@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+npm-debug.log*
+*.tgz
+coverage/
+dist/
+.agent-screens/
+tmp/
