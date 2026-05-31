@@ -37,15 +37,23 @@ Then run `/screenshotter on`.
 
 ## Savings
 
-| Size | Original | Default | Token mode | Bandwidth saved / 1k | GPT-5.5 tokens saved | Claude Opus tokens saved |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Pro Display XDR | 5.48 MB | 0.89 MB | 0.36 MB | 5.0 GB | 7,284 | 1,152 |
-| 16in MacBook Pro | 1.86 MB | 0.83 MB | 0.20 MB | 1.6 GB | 6,284 | 3,095 |
-| 14in MacBook Pro | 2.34 MB | 0.75 MB | 0.20 MB | 2.1 GB | 4,614 | 3,088 |
-| Window 1920x1200 | 1.04 MB | 0.40 MB | 0.20 MB | 0.8 GB | 1,048 | 1,438 |
-| Window 1440x900 | 0.63 MB | 0.38 MB | 0.20 MB | 0.4 GB | 73 | 94 |
+| Size | Original | Default | Size saved | Bandwidth saved / 1k |
+| --- | ---: | ---: | ---: | ---: |
+| Pro Display XDR 6016x3384 | 5.48 MB | 0.89 MB | 93% | 5.0 GB |
+| 16in MacBook Pro 3456x2234 | 1.86 MB | 0.83 MB | 89% | 1.6 GB |
+| 14in MacBook Pro 3024x1964 | 2.34 MB | 0.75 MB | 91% | 2.1 GB |
+| Window 1920x1200 | 1.04 MB | 0.40 MB | 81% | 0.8 GB |
+| Window 1440x900 | 0.63 MB | 0.38 MB | 68% | 0.4 GB |
 
 Average from 5 recent screenshots. Default preserves readability. Token mode resizes for lower API image-token cost.
+
+Default mode helps with:
+
+- Upload bandwidth: often `2-5 MB -> <1 MB`.
+- Paste/send latency: less image data for Codex or Claude to ingest.
+- Local storage: optimized copies are smaller.
+- Reliability: less likely to hit attachment limits.
+- Readability per byte: efficient encoding while keeping dimensions high.
 
 ## Profiles
 
