@@ -45,7 +45,7 @@ Then run `/screenshotter on`.
 | Window 1920x1200 | 1.04 MB | 0.40 MB | 81% | 0.8 GB |
 | Window 1440x900 | 0.63 MB | 0.38 MB | 68% | 0.4 GB |
 
-Average from 5 recent screenshots. Default preserves readability. Token mode resizes for lower API image-token cost.
+Average from 5 recent screenshots. Default preserves readability. Token mode resizes for lower API image-token cost. Downscale defaults are checked with Apple Vision text-readability benchmarks.
 
 Default mode helps with:
 
