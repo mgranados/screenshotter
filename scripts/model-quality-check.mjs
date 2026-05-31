@@ -45,7 +45,7 @@ if (!args["allow-external"]) {
   process.exit(2);
 }
 
-const workDir = mkdtempSync(join(tmpdir(), "agent-screens-model-quality-"));
+const workDir = mkdtempSync(join(tmpdir(), "screenshotter-model-quality-"));
 try {
   console.error(`Using model: ${model}`);
   console.error("Running model check on original image...");

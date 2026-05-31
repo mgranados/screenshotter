@@ -1,20 +1,37 @@
 {
-  "name": "agent-screens",
+  "name": "@mgranados/screenshotter",
   "version": "0.0.1",
-  "private": true,
+  "private": false,
   "type": "module",
   "license": "MIT",
   "description": "Local-first macOS screenshot attachments for AI coding agents.",
+  "homepage": "https://github.com/mgranados/screenshotter#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mgranados/screenshotter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mgranados/screenshotter/issues"
+  },
+  "os": [
+    "darwin"
+  ],
   "bin": {
-    "agent-screens": "bin/agent-screens.mjs"
+    "screenshotter": "bin/screenshotter.mjs",
+    "screenshotter-mcp": "bin/screenshotter-mcp.mjs"
   },
   "scripts": {
-    "bench": "node bin/agent-screens.mjs bench --latest 10 --json",
+    "doctor": "node bin/screenshotter.mjs doctor",
+    "bench": "node bin/screenshotter.mjs bench --latest 10 --json",
+    "bench:poc": "node scripts/poc-benchmarks.mjs",
     "eval:text-scale": "node scripts/text-scale-eval.mjs",
     "quality": "node scripts/quality-check.mjs",
     "quality:model": "node scripts/model-quality-check.mjs",
-    "check": "node --check bin/agent-screens.mjs && node --check extensions/screenshotter/index.js && node --check scripts/smoke-test.mjs && node --check scripts/quality-check.mjs && node --check scripts/model-quality-check.mjs && node --check scripts/text-scale-eval.mjs && npm run test",
-    "test": "node scripts/smoke-test.mjs"
+    "eval:rivals": "node scripts/rival-eval.mjs",
+    "pack:dry-run": "npm_config_cache=${TMPDIR:-/tmp}/screenshotter-npm-cache npm pack --dry-run",
+    "prepublishOnly": "npm run check && npm run pack:dry-run",
+    "check": "node --check bin/screenshotter.mjs && node --check bin/screenshotter-mcp.mjs && node --check extensions/screenshotter/index.js && node --check scripts/smoke-test.mjs && node --check scripts/pi-extension-smoke-test.mjs && node --check scripts/mcp-smoke-test.mjs && node --check scripts/quality-check.mjs && node --check scripts/model-quality-check.mjs && node --check scripts/text-scale-eval.mjs && node --check scripts/poc-benchmarks.mjs && node --check scripts/rival-eval.mjs && npm run test",
+    "test": "node scripts/smoke-test.mjs && node scripts/pi-extension-smoke-test.mjs && node scripts/mcp-smoke-test.mjs"
   },
   "files": [
     "bin",
@@ -23,9 +40,13 @@
     "extensions",
     "scripts",
     "skills",
+    "CHANGELOG.md",
     "LICENSE",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },
@@ -41,8 +62,13 @@
     "pi-package",
     "screenshots",
     "ai-agents",
+    "apple-vision",
     "codex",
     "claude-code",
+    "image-optimization",
     "macos"
-  ]
+  ],
+  "dependencies": {
+    "sharp": "^0.34.5"
+  }
 }

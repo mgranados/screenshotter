@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const cli = join(root, "bin", "agent-screens.mjs");
+const cli = join(root, "bin", "screenshotter.mjs");
 const args = parseArgs(process.argv.slice(2));
 const image = args.image || args._[0];
 if (!image) {
@@ -15,7 +15,7 @@ if (!image) {
 }
 
 const minSsim = Number(args["min-ssim"] ?? 0.99);
-const dataDir = args["data-dir"] || mkdtempSync(join(tmpdir(), "agent-screens-quality-"));
+const dataDir = args["data-dir"] || mkdtempSync(join(tmpdir(), "screenshotter-quality-"));
 let shouldCleanup = !args["data-dir"];
 
 try {

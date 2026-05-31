@@ -10,6 +10,7 @@ const DEFAULT_EDGES = [3000, 2600, 2400, 2200, 2000, 1800, 1600];
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".tif", ".tiff"]);
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VISION_OCR_SOURCE = join(ROOT_DIR, "scripts", "apple-vision-ocr.swift");
+const VISION_BATCH_OCR_SOURCE = join(ROOT_DIR, "scripts", "apple-vision-batch-ocr.swift");
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
@@ -35,7 +36,7 @@ const minSourceLongEdge = args["min-source-long-edge"] === undefined
   ? undefined
   : parsePositiveInteger(args["min-source-long-edge"], undefined);
 const keep = Boolean(args.keep);
-const workDir = args["work-dir"] ? resolve(expandHome(args["work-dir"])) : mkdtempSync(join(tmpdir(), "agent-screens-text-scale-"));
+const workDir = args["work-dir"] ? resolve(expandHome(args["work-dir"])) : mkdtempSync(join(tmpdir(), "screenshotter-text-scale-"));
 
 if (!Number.isFinite(minRetention) || minRetention < 0 || minRetention > 1) {
   console.error("--min-retention must be between 0 and 1");
@@ -81,20 +82,24 @@ if (!commandExists("sips")) {
 }
 
 let visionOcrBinary;
+let visionBatchOcrBinary;
+let visionBatchFallbacks = 0;
 
 try {
-  if (engine === "vision") visionOcrBinary = compileVisionOcrHelper();
+  if (engine === "vision") visionBatchOcrBinary = compileVisionBatchOcrHelper();
   const filteredImages = await latestImages(screenshotDir, latest, { minSourceLongEdge });
-  const rows = [];
+  const originalTexts = recognizeTexts(filteredImages.map((imagePath) => ({ path: imagePath, label: "original" })));
+  const rowSlots = [];
+  const variantItems = [];
 
   for (const imagePath of filteredImages) {
-    const originalText = recognizeText(imagePath, "original");
+    const originalText = originalTexts.get(imagePath) ?? "";
     const originalTokens = tokenCounts(originalText);
     const originalTokenCount = countTokens(originalTokens);
     const originalDimensions = imageDimensions(imagePath);
     const originalBytes = statSync(imagePath).size;
     if (originalTokenCount === 0) {
-      rows.push({
+      rowSlots.push({
         path: imagePath,
         skipped: "no text detected in original",
         originalBytes,
@@ -108,9 +113,6 @@ try {
     const variants = [];
     for (const maxLongEdge of edges) {
       const variantPath = createVariant(imagePath, workDir, maxLongEdge, jpegQuality, originalDimensions);
-      const variantText = recognizeText(variantPath, `max ${maxLongEdge}`);
-      const variantTokens = tokenCounts(variantText);
-      const retention = tokenRetention(originalTokens, variantTokens);
       const dimensions = imageDimensions(variantPath);
       const optimizedBytes = statSync(variantPath).size;
       variants.push({
@@ -120,9 +122,7 @@ try {
         height: dimensions.height,
         optimizedBytes,
         bytesSavedPercent: originalBytes > 0 ? round((1 - optimizedBytes / originalBytes) * 100, 1) : 0,
-        tokenRetention: round(retention, 4),
         originalTextTokens: originalTokenCount,
-        recognizedTextTokens: countTokens(variantTokens),
         tokenEstimates: tokenEstimatesForDimensions({
           originalWidth: originalDimensions.width,
           originalHeight: originalDimensions.height,
@@ -130,17 +130,40 @@ try {
           height: dimensions.height,
         }),
       });
+      variantItems.push({ path: variantPath, label: `max ${maxLongEdge}` });
     }
 
-    rows.push({
+    rowSlots.push({
       path: imagePath,
       originalBytes,
       originalWidth: originalDimensions.width,
       originalHeight: originalDimensions.height,
+      originalTokens,
       originalTokenCount,
       variants,
     });
   }
+
+  const variantTexts = recognizeTexts(variantItems);
+  const rows = rowSlots.map((row) => {
+    if (row.skipped) return row;
+    return {
+      path: row.path,
+      originalBytes: row.originalBytes,
+      originalWidth: row.originalWidth,
+      originalHeight: row.originalHeight,
+      originalTokenCount: row.originalTokenCount,
+      variants: row.variants.map((variant) => {
+        const variantText = variantTexts.get(variant.path) ?? "";
+        const variantTokens = tokenCounts(variantText);
+        return {
+          ...variant,
+          tokenRetention: round(tokenRetention(row.originalTokens, variantTokens), 4),
+          recognizedTextTokens: countTokens(variantTokens),
+        };
+      }),
+    };
+  });
 
   const evaluatedRows = rows.filter((row) => !row.skipped);
   const summaries = edges.map((maxLongEdge) => {
@@ -176,6 +199,10 @@ try {
     model: engine === "codex" ? model : undefined,
     visionLevel: engine === "vision" ? visionLevel : undefined,
     visionLanguages: engine === "vision" ? visionLanguages : undefined,
+    visionBatch: engine === "vision" ? {
+      enabled: true,
+      fallbackImages: visionBatchFallbacks,
+    } : undefined,
     note: engineNote(),
     screenshotDir,
     workDir,
@@ -213,6 +240,17 @@ function recognizeText(imagePath, label) {
   return recognizeTextWithOcr(imagePath);
 }
 
+function recognizeTexts(items) {
+  if (items.length === 0) return new Map();
+  if (engine === "vision") return recognizeTextsWithVisionBatch(items.map((item) => item.path));
+
+  const texts = new Map();
+  for (const item of items) {
+    texts.set(item.path, recognizeText(item.path, item.label));
+  }
+  return texts;
+}
+
 function recognizeTextWithOcr(imagePath) {
   const result = spawnSync("tesseract", [
     imagePath,
@@ -232,6 +270,7 @@ function recognizeTextWithOcr(imagePath) {
 }
 
 function recognizeTextWithVision(imagePath) {
+  if (!visionOcrBinary) visionOcrBinary = compileVisionOcrHelper();
   const result = spawnSync(visionOcrBinary, [
     imagePath,
     "--level", visionLevel,
@@ -247,6 +286,51 @@ function recognizeTextWithVision(imagePath) {
   }
 
   return result.stdout;
+}
+
+function recognizeTextsWithVisionBatch(paths) {
+  const result = spawnSync(visionBatchOcrBinary, [
+    "--level", visionLevel,
+    "--languages", visionLanguages.join(","),
+    "--include-text",
+    ...paths,
+  ], {
+    encoding: "utf8",
+    maxBuffer: 50 * 1024 * 1024,
+    timeout: timeoutMs,
+  });
+
+  if (result.status !== 0) {
+    visionBatchFallbacks += paths.length;
+    const fallback = new Map();
+    for (const path of paths) fallback.set(path, recognizeTextWithVision(path));
+    return fallback;
+  }
+
+  const parsed = parseJsonish(result.stdout);
+  if (!Array.isArray(parsed.rows)) {
+    visionBatchFallbacks += paths.length;
+    const fallback = new Map();
+    for (const path of paths) fallback.set(path, recognizeTextWithVision(path));
+    return fallback;
+  }
+
+  const texts = new Map();
+  for (const row of parsed.rows) {
+    if (row.error) {
+      visionBatchFallbacks += 1;
+      texts.set(row.path, recognizeTextWithVision(row.path));
+    } else {
+      texts.set(row.path, typeof row.text === "string" ? row.text : "");
+    }
+  }
+  for (const path of paths) {
+    if (!texts.has(path)) {
+      visionBatchFallbacks += 1;
+      texts.set(path, recognizeTextWithVision(path));
+    }
+  }
+  return texts;
 }
 
 function recognizeTextWithCodex(imagePath, label) {
@@ -306,6 +390,34 @@ function compileVisionOcrHelper() {
 
   if (result.status !== 0) {
     throw new Error(`Apple Vision OCR helper failed to compile\n${result.stderr || result.stdout}`);
+  }
+
+  return outputPath;
+}
+
+function compileVisionBatchOcrHelper() {
+  const outputPath = join(workDir, "apple-vision-batch-ocr");
+  const moduleCachePath = join(workDir, "swift-module-cache");
+  mkdirSync(moduleCachePath, { recursive: true });
+  const result = spawnSync("xcrun", [
+    "swiftc",
+    "-module-cache-path",
+    moduleCachePath,
+    VISION_BATCH_OCR_SOURCE,
+    "-o",
+    outputPath,
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CLANG_MODULE_CACHE_PATH: moduleCachePath,
+    },
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: timeoutMs,
+  });
+
+  if (result.status !== 0) {
+    throw new Error(`Apple Vision batch OCR helper failed to compile\n${result.stderr || result.stdout}`);
   }
 
   return outputPath;
@@ -493,6 +605,7 @@ function printHumanResult(result) {
   console.log("Text scale eval");
   console.log(`Engine: ${result.engine}${result.model ? ` (${result.model})` : ""}`);
   if (result.engine === "vision") console.log(`Apple Vision: ${result.visionLevel}, ${result.visionLanguages.join(",")}`);
+  if (result.visionBatch) console.log(`Apple Vision batch: ${result.visionBatch.enabled ? "on" : "off"}, fallbacks ${result.visionBatch.fallbackImages}`);
   console.log(`Screenshots: ${result.evaluatedCount} evaluated, ${result.skippedCount} skipped`);
   if (result.minSourceLongEdge) console.log(`Source filter: long edge >= ${result.minSourceLongEdge}px`);
   console.log(result.note);

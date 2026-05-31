@@ -1,12 +1,30 @@
 # Release Checklist
 
+## Preflight
+
+1. Confirm package metadata:
+   - `name`
+   - `version`
+   - `description`
+   - `license`
+   - `repository`
+   - `bugs`
+   - `homepage`
+2. Update `CHANGELOG.md`.
+3. Run:
+
+   ```sh
+   npm run check
+   npm run pack:dry-run
+   ```
+
 ## GitHub
 
 1. Create a public repository.
 2. Push this folder:
 
    ```sh
-   git remote add origin git@github.com:<owner>/agent-screens.git
+   git remote add origin git@github.com:mgranados/screenshotter.git
    git branch -M main
    git push -u origin main
    ```
@@ -26,6 +44,28 @@
    - Codex/Claude desktop clipboard helpers
    - pi `/screenshotter on` extension
 
+## npm
+
+The first public distribution should be npm:
+
+```sh
+npm publish
+```
+
+Expected user install:
+
+```sh
+npm install -g @mgranados/screenshotter
+screenshotter doctor
+```
+
+After publishing, verify from a clean directory:
+
+```sh
+npm view @mgranados/screenshotter version
+npx @mgranados/screenshotter version
+```
+
 ## Homebrew Later
 
 After the CLI contract settles, add a tap formula that installs a packaged standalone binary or source checkout wrapper.
@@ -33,15 +73,17 @@ After the CLI contract settles, add a tap formula that installs a packaged stand
 The eventual install target should be:
 
 ```sh
-brew install agent-screens
+brew install screenshotter
 ```
 
 ## v0.1 Criteria
 
-- `agent-screens watch` works on macOS.
-- `agent-screens bench --latest 10` is documented.
+- `screenshotter watch` works on macOS and auto-detects the likely agent target.
+- `screenshotter doctor` reports required setup checks clearly.
+- `screenshotter bench --latest 10` is documented.
 - pi `/screenshotter on` works through the CLI.
 - Codex CLI wrapper works with `codex --image`.
 - Claude Code wrapper works by passing optimized image paths in the prompt.
+- MCP server initializes and returns image content from the smoke test.
 - Desktop app helpers copy optimized images to the clipboard.
 - README explains local storage and privacy.

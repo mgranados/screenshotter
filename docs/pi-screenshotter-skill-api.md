@@ -1,8 +1,8 @@
 # pi Screenshotter Skill API
 
-This document is the handoff contract for a pi `/screenshotter` skill that uses the local `agent-screens` CLI.
+This document is the handoff contract for a pi `/screenshotter` skill that uses the local `screenshotter` CLI.
 
-`agent-screens` is a local executable API. It does not require login, network access, MCP, or a background service. The pi skill should call the executable, read JSON from stdout, and attach returned `optimizedPath` images to the next interactive prompt.
+`screenshotter` is a local executable API. It does not require login, network access, MCP, or a background service. The pi skill should call the executable, read JSON from stdout, and attach returned `optimizedPath` images to the next interactive prompt.
 
 ## Vocabulary
 
@@ -22,21 +22,21 @@ Compatibility aliases exist, but new pi code should use `prepare`, `claim`, and 
 
 ## CLI Resolution
 
-Prefer `AGENT_SCREENS_CLI` when set. Otherwise use the repo-local CLI path.
+Prefer `SCREENSHOTTER_CLI` when set. Otherwise use the repo-local CLI path.
 
 For a source checkout:
 
 ```sh
-node <agent-screens-checkout>/bin/agent-screens.mjs status --json
+node <screenshotter-checkout>/bin/screenshotter.mjs status --json
 ```
 
 For an installed package:
 
 ```sh
-agent-screens status --json
+screenshotter status --json
 ```
 
-If `AGENT_SCREENS_CLI` points to a `.js` or `.mjs` file, execute it with `node`. If it points to a binary name, execute it directly.
+If `SCREENSHOTTER_CLI` points to a `.js` or `.mjs` file, execute it with `node`. If it points to a binary name, execute it directly.
 
 ## Target
 
@@ -57,37 +57,37 @@ Every prepare/list/claim/clear command should include:
 Prepare one screenshot:
 
 ```sh
-agent-screens prepare "/path/to/Screenshot.png" --target pi --json
+screenshotter prepare "/path/to/Screenshot.png" --target pi --json
 ```
 
 List ready screenshots:
 
 ```sh
-agent-screens list --target pi --state ready --json
+screenshotter list --target pi --state ready --json
 ```
 
 Claim screenshots for the next prompt:
 
 ```sh
-agent-screens claim --target pi --max 4 --fresh-ms 600000 --json
+screenshotter claim --target pi --max 4 --fresh-ms 600000 --json
 ```
 
 Clear pi screenshots:
 
 ```sh
-agent-screens clear --target pi --json
+screenshotter clear --target pi --json
 ```
 
 Status:
 
 ```sh
-agent-screens status --target pi --json
+screenshotter status --target pi --json
 ```
 
 Get the native macOS screenshot folder:
 
 ```sh
-agent-screens screenshot-dir --json
+screenshotter screenshot-dir --json
 ```
 
 ## JSON Shapes
@@ -100,7 +100,7 @@ Prepare response:
     "id": "scr_42b31d7edf39_mph6jxml",
     "hash": "sha256...",
     "sourcePath": "/Users/me/Desktop/Screenshot.png",
-    "optimizedPath": "/Users/me/Library/Application Support/agent-screens/optimized/42b31d.jpg",
+    "optimizedPath": "/Users/me/Library/Application Support/screenshotter/optimized/42b31d.jpg",
     "mimeType": "image/jpeg",
     "createdAt": "2026-05-22T16:11:28.511Z",
     "preparedAt": "2026-05-22T17:15:01.244Z",
@@ -127,7 +127,7 @@ Claim response:
   "screens": [
     {
       "id": "scr_42b31d7edf39_mph6jxml",
-      "optimizedPath": "/Users/me/Library/Application Support/agent-screens/optimized/42b31d.jpg",
+      "optimizedPath": "/Users/me/Library/Application Support/screenshotter/optimized/42b31d.jpg",
       "mimeType": "image/jpeg",
       "status": "claimed",
       "target": "pi",
@@ -143,7 +143,7 @@ Status response:
 ```json
 {
   "version": "0.0.1",
-  "dataDir": "/Users/me/Library/Application Support/agent-screens",
+  "dataDir": "/Users/me/Library/Application Support/screenshotter",
   "screenshotDir": "/Users/me/Desktop",
   "ready": 1,
   "claimed": 0,
@@ -157,8 +157,8 @@ The pi skill should attach `optimizedPath` and use `mimeType` as the image MIME 
 ## Suggested pi Flow
 
 1. `/screenshotter on`
-   - Resolve the screenshot directory with `agent-screens screenshot-dir --json`.
-   - Clear old pi items with `agent-screens clear --target pi --json`.
+   - Resolve the screenshot directory with `screenshotter screenshot-dir --json`.
+   - Clear old pi items with `screenshotter clear --target pi --json`.
    - Watch or poll the screenshot directory.
    - Only process screenshots while pi is idle.
 
@@ -167,25 +167,29 @@ The pi skill should attach `optimizedPath` and use `mimeType` as the image MIME 
    - Ignore files older than the `/screenshotter on` timestamp.
    - Ignore files created while the agent is running.
    - Wait briefly until the file is stable if the skill does its own stability check.
-   - Run `agent-screens prepare <path> --target pi --json`.
-   - Refresh ready count with `agent-screens list --target pi --state ready --json`.
+   - Run `screenshotter prepare <path> --target pi --profile readability --json` by default.
+   - Refresh ready count with `screenshotter list --target pi --state ready --json`.
 
 3. Before the next interactive user prompt
    - Wait briefly for in-flight prepare tasks.
-   - Run `agent-screens claim --target pi --max 4 --fresh-ms 600000 --json`.
+   - Run `screenshotter claim --target pi --max 4 --fresh-ms 600000 --json`.
    - Attach each claimed screenshot from `screens[].optimizedPath`.
    - Submit the user's original text plus the image attachments.
 
 4. `/screenshotter status`
-   - Run `agent-screens status --target pi --tokens --json`.
-   - Show whether watching is on, watcher mode, watched directory, `ready` count, byte savings, and estimated token savings.
+   - Run `screenshotter status --target pi --tokens --json`.
+   - Show whether watching is on, active profile, watcher mode, watched directory, `ready` count, byte savings, and estimated token savings.
 
-5. `/screenshotter clear`
-   - Run `agent-screens clear --target pi --json`.
+5. `/screenshotter token`, `/screenshotter balanced`, `/screenshotter readability`
+   - Store the selected profile for future `prepare` calls in this pi session.
+   - Keep `readability` as the default so tiny UI text remains readable.
 
-6. `/screenshotter off`
+6. `/screenshotter clear`
+   - Run `screenshotter clear --target pi --json`.
+
+7. `/screenshotter off`
    - Stop the watcher.
-   - Run `agent-screens clear --target pi --json`.
+   - Run `screenshotter clear --target pi --json`.
 
 ## Attachment Rules
 
@@ -201,21 +205,23 @@ The pi skill should attach `optimizedPath` and use `mimeType` as the image MIME 
 Paste this into the pi screenshotter skill:
 
 ```md
-Use the local `agent-screens` CLI as the screenshot API.
+Use the local `screenshotter` CLI as the screenshot API.
 
 Public lifecycle: `prepare -> ready -> claim -> cleared`.
 
 Use target `pi` for all commands.
 
 Commands:
-- `agent-screens screenshot-dir --json` to find the native macOS screenshot folder.
-- `agent-screens prepare <path> --target pi --json` when a new native screenshot is detected.
-- `agent-screens list --target pi --state ready --json` to count ready screenshots.
-- `agent-screens claim --target pi --max 4 --fresh-ms 600000 --json` immediately before the next interactive prompt.
-- `agent-screens clear --target pi --json` for `/screenshotter clear` and `/screenshotter off`.
-- `agent-screens status --target pi --tokens --json` for `/screenshotter status`.
+- `screenshotter screenshot-dir --json` to find the native macOS screenshot folder.
+- `screenshotter prepare <path> --target pi --profile readability --json` when a new native screenshot is detected by default.
+- `screenshotter prepare <path> --target pi --profile balanced --json` only after the user switches to the safer debugging profile.
+- `screenshotter prepare <path> --target pi --profile token --json` only after the user switches to the cost-focused profile.
+- `screenshotter list --target pi --state ready --json` to count ready screenshots.
+- `screenshotter claim --target pi --max 4 --fresh-ms 600000 --json` immediately before the next interactive prompt.
+- `screenshotter clear --target pi --json` for `/screenshotter clear` and `/screenshotter off`.
+- `screenshotter status --target pi --tokens --json` for `/screenshotter status`.
 
 Attach `screens[].optimizedPath` from the claim response to the user's next prompt. Use `screens[].mimeType` as the MIME type. Only claim while handling an interactive user prompt. Ignore screenshots captured while the agent is already running.
 
-If `AGENT_SCREENS_CLI` is set, use it. If it points to a `.js` or `.mjs` file, execute it with `node`; otherwise execute it directly. If unset in local development, use the repo-local `bin/agent-screens.mjs`.
+If `SCREENSHOTTER_CLI` is set, use it. If it points to a `.js` or `.mjs` file, execute it with `node`; otherwise execute it directly. If unset in local development, use the repo-local `bin/screenshotter.mjs`.
 ```

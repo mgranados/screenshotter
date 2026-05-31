@@ -1,0 +1,50 @@
+name: Bug Report
+description: Report a reproducible problem with screenshotter.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach private screenshots. Use synthetic screenshots or paste aggregate command output.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Minimal commands or steps to reproduce.
+      placeholder: |
+        screenshotter status --json
+        screenshotter prepare /path/to/synthetic.png --json
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: macOS version, Node version, screenshotter version, and install method.
+      placeholder: |
+        macOS:
+        node --version:
+        screenshotter version:
+        install method:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Output
+      render: shell

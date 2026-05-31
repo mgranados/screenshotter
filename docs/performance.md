@@ -1,22 +1,24 @@
 # Performance
 
-The default policy is the balanced-fast profile:
+The default policy is the readability profile:
 
+- `readability`: JPEG quality 90, max long edge 4096 px, 1 MB byte target.
+- `token`: JPEG quality 85, 40% of source long edge, floor 1400 px, cap 2200 px.
 - `balanced`: JPEG quality 50, max long edge 2200 px, direct-copy sendable screenshots at or below 256 KB.
-- `token`: JPEG quality 45, max long edge 1024 px.
-- `readability`: JPEG quality 78, max long edge 4096 px, direct-copy sendable screenshots at or below 512 KB.
 
-All profiles use `sips` only in the hot path, parse PNG/JPEG/GIF/WebP metadata locally before falling back to `sips`, keep the original file when JPEG would be larger, and avoid WebP, MozJPEG, OCR, or multi-candidate search during normal preparation.
+All profiles use Sharp/libvips by default, with native macOS ImageIO and `sips` fallbacks. The default JPEG path uses 4:4:4 chroma for UI text, Sharp quantisation table 3, strips metadata, keeps the original file when JPEG would be larger, and avoids WebP, AVIF, OCR, or slow MozJPEG during normal preparation.
 
-This is the deliberate compromise: lower compression ratio than exhaustive candidate search, but much faster and predictable enough for live agent workflows. Small screenshots can skip conversion because saving tens of KB is usually not worth a `sips` process launch, and preserving the original is also higher quality.
+The readability profile tries q90 first, then q88/q85 only when needed to stay under the byte target. This keeps quality high for most screenshots while avoiding oversized full-desktop attachments.
 
 ## Local Benchmark
 
 Command:
 
 ```sh
-agent-screens bench --latest 20 --json
-agent-screens bench --latest 20 --profile token --tokens --json
+screenshotter bench --latest 20 --json
+screenshotter bench --latest 20 --profile balanced --json
+screenshotter bench --latest 20 --profile balanced --optimizer sips --json
+screenshotter bench --latest 20 --tokens --json
 ```
 
 Quality command:
@@ -25,27 +27,28 @@ Quality command:
 npm run quality -- --image "/path/to/screenshot.png" --min-ssim 0.99
 ```
 
-Representative local run against a folder of recent macOS screenshots:
+Representative local run against the latest macOS screenshot with the default `readability` profile:
 
 | Metric | Result |
 | --- | ---: |
-| Sample | 20 recent PNG screenshots |
-| Average prepare time | 75.9 ms |
-| Median prepare time | 107.0 ms |
-| Min / max prepare time | 1.7 ms / 161.3 ms |
-| Original total | 10.03 MB |
-| Optimized total | 2.62 MB |
-| Size reduction | 73.9% |
-| `patchBudget10000` savings | 45.6% |
+| Source | 3456x2234 PNG |
+| Optimized | 3456x2234 JPEG |
+| Prepare time | 79.6 ms |
+| Original size | 2.07 MB |
+| Optimized size | 958 KB |
+| Size reduction | 55.9% |
+| `gpt5HighDetailTiles` savings | 0.0% |
+| `patchBudget10000` savings | 0.0% |
 
-Control run on the same 20-screenshot sample with the previous 3000 px balanced edge:
+Control runs on the latest 5-screenshot sample:
 
-| Max long edge | Avg prepare | Median prepare | Optimized total | Size reduction | `patchBudget10000` savings |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 3000 px | 70.2 ms | 100.2 ms | 3.31 MB | 67.0% | 23.0% |
-| 2200 px | 75.9 ms | 107.0 ms | 2.62 MB | 73.9% | 45.6% |
+| Path | Avg prepare | Median prepare | Optimized total | Size reduction | `patchBudget10000` savings |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sharp/libvips, readability full size, q90/q88 byte ladder | 125.1 ms | 86.4 ms | 4.48 MB | 71.5% | 0.0% |
+| native ImageIO, readability full size, q88 | 88.1 ms | 83.6 ms | 5.77 MB | 63.3% | 0.0% |
+| native ImageIO, readability full size, q90 | 91.3 ms | 71.1 ms | 5.83 MB | 62.9% | 0.0% |
 
-Before local metadata parsing and the small-file direct-copy threshold, a previous 20-screenshot sample averaged 186.1 ms with a 172.7 ms median. The current path is still much faster than that old baseline while using the smaller Apple Vision-backed 2200 px default.
+The default now prioritizes reading tiny UI text and keeping files near 1 MB over image-token savings. Use `--profile token` when cost matters more than full screenshot readability, and use `--optimizer native` or `--optimizer sips` for comparison.
 
 ## Token Estimates
 
@@ -57,29 +60,48 @@ Before local metadata parsing and the small-file direct-copy threshold, a previo
 
 The estimates intentionally do not treat JPEG byte savings as token savings. Token savings appear when a profile changes image dimensions.
 
-Use the token profile when cost is more important than full-resolution readability:
+The token profile is available when you want scripts to document that cost is more important than full-resolution readability:
 
 ```sh
-agent-screens prepare "/path/to/screenshot.png" --profile token --json
-agent-screens bench --latest 100 --profile token --tokens --json
+screenshotter prepare "/path/to/screenshot.png" --profile token --json
+screenshotter bench --latest 100 --profile token --tokens --json
 ```
 
-Current 20-screenshot `token` profile run:
+Current latest-screenshot `token` profile comparison:
 
 | Metric | Result |
 | --- | ---: |
-| Average prepare time | 96.4 ms |
-| Median prepare time | 110.3 ms |
-| Optimized total | 1.16 MB |
-| Size reduction | 88.5% |
-| `gpt5HighDetailTiles` savings | 27.8% |
-| `patchBudget10000` savings | 82.7% |
+| Prepare time | 50.1 ms |
+| Optimized size | 309 KB |
+| Size reduction | 85.4% |
+| `gpt5HighDetailTiles` savings | 0.0% |
+| `patchBudget10000` savings | 83.1% |
+
+On the latest full-desktop screenshot, the old token default produced `3456x2234 -> 1400x905` and `2.07 MB -> 309 KB`. That was good compression but did not preserve tiny menu/status text. The new readability default keeps `3456x2234` and produced `2.07 MB -> 1.17 MB`, which is the right tradeoff when every label matters.
+
+## Rival Eval
+
+Use the rival eval when changing defaults or tuning the token profile. It benchmarks competing edge/quality settings, runs an optional text-retention gate, then ranks only the candidates that pass.
+
+```sh
+npm run eval:rivals -- --latest 20 --quality-engine vision
+```
+
+The built-in rivals compare smaller fixed `token` sizes, `balanced` sizes from 1600-2200 px, and the `readability` profile. The ranking favors API image-token savings first, then byte savings and speed, while excluding candidates that miss the configured p10 text-retention gate.
+
+Useful variants:
+
+```sh
+npm run eval:rivals -- --quality-engine none --json
+npm run eval:rivals -- --quality-engine vision --quality-latest 20 --min-retention 0.9
+npm run eval:rivals -- --candidates cheap:1024:45:token,fixed:1400:85:token,debug:2200:50:balanced
+```
 
 ## Text Downscale Eval
 
 Retina screenshots are the best place to save tokens without removing screen area. The text-scale eval tests full-image downscales across multiple screenshots and compares recognized text against the original. It does not crop or mask any part of the screenshot.
 
-Recommended local gate using Apple Vision OCR:
+Recommended local gate using batched Apple Vision OCR:
 
 ```sh
 npm run eval:text-scale -- \
@@ -126,7 +148,7 @@ Current local retina-only Apple Vision run:
 | 1500 px | 87.1% | 93.8% | 90.1% | 83.1% | Fails p10 |
 | 1400 px | 87.0% | 93.0% | 91.4% | 85.3% | Fails p10 |
 
-Practical default: `balanced` uses 2200 px because it is the current best candidate from Apple Vision. A 10-screenshot sweep made 1600 px look viable, but the larger 20-screenshot run dropped below the 90% p10 gate. Do not push lower by default until a cheap model-backed Codex eval passes the same screenshot corpus.
+Practical readability profile: `balanced` uses 2200 px because it is the current best candidate from Apple Vision. A 10-screenshot sweep made 1600 px look viable, but the larger 20-screenshot run dropped below the 90% p10 gate. Keep 2200 px available for text-heavy debugging until a cheap model-backed Codex eval passes the same screenshot corpus at a smaller size.
 
 ## Pokémon Sheet Stress Test
 
@@ -142,7 +164,7 @@ On that image:
 | 78 | 386 KB | 0.990305 | 43.67 dB |
 | 82 | 399 KB | 0.991408 | 44.50 dB |
 
-Quality 50 is the current default because it is the smallest tested setting so far that passed the external model readability gate on this sheet:
+Quality 50 is the `balanced` profile setting because it is the smallest tested setting so far that passed the external model readability gate on this sheet:
 
 ```json
 {

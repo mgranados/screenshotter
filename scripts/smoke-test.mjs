@@ -6,18 +6,36 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const cli = join(root, "bin", "agent-screens.mjs");
-const workDir = mkdtempSync(join(tmpdir(), "agent-screens-smoke-"));
+const cli = join(root, "bin", "screenshotter.mjs");
+const workDir = mkdtempSync(join(tmpdir(), "screenshotter-smoke-"));
 const dataDir = join(workDir, "store");
 const imagePath = join(workDir, "input.png");
 
 try {
   writeFileSync(imagePath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lmV5xwAAAABJRU5ErkJggg==", "base64"));
 
+  const doctor = run(["doctor", "--data-dir", dataDir, "--json"]);
+  assert(doctor.ok === true, "doctor should pass required checks");
+  assert(doctor.defaultProfile?.profile === "readability", "doctor should report readability as the default profile");
+  assert(doctor.autoWatch?.clipboard === true, "watch should copy optimized screenshots to clipboard by default");
+
+  const originalProcessList = process.env.SCREENSHOTTER_PROCESS_LIST;
+  process.env.SCREENSHOTTER_PROCESS_LIST = "100 /Applications/Codex.app/Contents/Resources/codex /Applications/Codex.app/Contents/Resources/codex app-server --listen stdio://";
+  const codexDoctor = run(["doctor", "--data-dir", dataDir, "--json"]);
+  assert(codexDoctor.autoWatch?.target === "codex-app", "doctor should auto-detect Codex app for watch");
+  assert(codexDoctor.autoWatch?.clipboard === true, "Codex app auto-detect should enable clipboard handoff");
+  process.env.SCREENSHOTTER_PROCESS_LIST = "101 /usr/local/bin/codex codex exec review";
+  const codexCliDoctor = run(["doctor", "--data-dir", dataDir, "--json"]);
+  assert(codexCliDoctor.autoWatch?.target === "codex", "doctor should auto-detect Codex CLI for watch");
+  assert(codexCliDoctor.autoWatch?.clipboard === true, "Codex CLI auto-detect should still copy to clipboard by default");
+  if (originalProcessList === undefined) delete process.env.SCREENSHOTTER_PROCESS_LIST;
+  else process.env.SCREENSHOTTER_PROCESS_LIST = originalProcessList;
+
   run(["status", "--data-dir", dataDir, "--json"]);
   const prepared = run(["prepare", imagePath, "--target", "smoke", "--data-dir", dataDir, "--json"]);
   assert(prepared.screen?.optimizedPath, "prepare should return optimizedPath");
   assert(prepared.screen?.status === "ready", "prepare should return ready status");
+  assert(prepared.screen?.profile === "readability", "prepare should default to readability profile");
 
   const listed = run(["list", "--target", "smoke", "--state", "ready", "--data-dir", dataDir, "--json"]);
   assert(listed.screens?.length === 1, "list should return one ready screenshot");

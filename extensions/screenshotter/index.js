@@ -10,10 +10,11 @@ const READY_TTL_MS = 10 * 60_000;
 const MAX_READY_SCREENSHOTS = 4;
 const PROMPT_ATTACH_WAIT_MS = 1500;
 const POLL_INTERVAL_MS = 1500;
+const DEFAULT_PROFILE = "readability";
 const SCREENSHOT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".tif", ".tiff"]);
 
 const extensionDir = path.dirname(fileURLToPath(import.meta.url));
-const cliPath = path.resolve(extensionDir, "..", "..", "bin", "agent-screens.mjs");
+const cliPath = path.resolve(extensionDir, "..", "..", "bin", "screenshotter.mjs");
 
 export default function screenshotterExtension(pi) {
   const state = {
@@ -30,6 +31,7 @@ export default function screenshotterExtension(pi) {
     agentBusySinceMs: undefined,
     lastAgentBusyWindow: undefined,
     readyCount: 0,
+    profile: DEFAULT_PROFILE,
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -56,11 +58,12 @@ export default function screenshotterExtension(pi) {
     state.ctx = ctx;
     if (!state.enabled || event.source !== "interactive") return { action: "continue" };
 
+    trackProcessing(state, scanCandidates(pi, state));
     await waitForProcessing(state, PROMPT_ATTACH_WAIT_MS);
-    const claimed = await runAgentScreens(pi, ["claim", "--target", TARGET, "--max", String(MAX_READY_SCREENSHOTS), "--fresh-ms", String(READY_TTL_MS), "--json"]);
+    const claimed = await runScreenshotter(pi, ["claim", "--target", TARGET, "--max", String(MAX_READY_SCREENSHOTS), "--fresh-ms", String(READY_TTL_MS), "--json"]);
     const screens = Array.isArray(claimed.screens) ? claimed.screens : [];
     if (screens.length === 0) {
-      await refreshReadyCount(pi, state);
+      if (state.readyCount !== 0) await refreshReadyCount(pi, state);
       updateUi(ctx, state);
       return { action: "continue" };
     }
@@ -102,15 +105,22 @@ export default function screenshotterExtension(pi) {
         case "on":
           await enableScreens(pi, state, ctx);
           return;
+        case "token":
+        case "balanced":
+        case "readability":
+          state.profile = command.toLowerCase();
+          updateUi(ctx, state);
+          notify(ctx, `screenshotter profile ${state.profile}`);
+          return;
         case "off":
           stopWatcher(state);
-          await runAgentScreens(pi, ["clear", "--target", TARGET, "--json"]).catch(() => undefined);
+          await runScreenshotter(pi, ["clear", "--target", TARGET, "--json"]).catch(() => undefined);
           await refreshReadyCount(pi, state);
           updateUi(ctx, state);
           notify(ctx, "screenshotter off");
           return;
         case "clear": {
-          const result = await runAgentScreens(pi, ["clear", "--target", TARGET, "--json"]);
+          const result = await runScreenshotter(pi, ["clear", "--target", TARGET, "--json"]);
           await refreshReadyCount(pi, state);
           updateUi(ctx, state);
           notify(ctx, `cleared ${result.cleared ?? 0} screenshot${result.cleared === 1 ? "" : "s"}`);
@@ -142,7 +152,7 @@ async function enableScreens(pi, state, ctx) {
     return;
   }
 
-  const result = await runAgentScreens(pi, ["screenshot-dir", "--json"]);
+  const result = await runScreenshotter(pi, ["screenshot-dir", "--json"]);
   const watchDir = result.path || path.join(os.homedir(), "Desktop");
   const stat = await safeStat(watchDir);
   if (!stat?.isDirectory()) {
@@ -151,7 +161,7 @@ async function enableScreens(pi, state, ctx) {
   }
 
   stopWatcher(state);
-  await runAgentScreens(pi, ["clear", "--target", TARGET, "--json"]).catch(() => undefined);
+  await runScreenshotter(pi, ["clear", "--target", TARGET, "--json"]).catch(() => undefined);
 
   state.enabled = true;
   state.sinceMs = Date.now();
@@ -160,6 +170,7 @@ async function enableScreens(pi, state, ctx) {
   state.processingPaths.clear();
   state.fileSignatures = await snapshotFileSignatures(watchDir);
   state.readyCount = 0;
+  state.profile = state.profile || DEFAULT_PROFILE;
 
   startNativeWatcher(pi, state);
 
@@ -189,7 +200,7 @@ function startNativeWatcher(pi, state) {
 
       const name = normalizeWatchFileName(fileName);
       if (!name) {
-        trackProcessing(state, scanRecentCandidates(pi, state));
+        trackProcessing(state, scanCandidates(pi, state));
         return;
       }
 
@@ -220,10 +231,10 @@ function startPollingFallback(pi, state, error) {
   state.watchMode = "polling";
 
   state.pollTimer = setInterval(() => {
-    trackProcessing(state, pollRecentCandidates(pi, state));
+    trackProcessing(state, scanCandidates(pi, state, { changedOnly: true }));
   }, POLL_INTERVAL_MS);
   state.pollTimer.unref?.();
-  trackProcessing(state, pollRecentCandidates(pi, state));
+  trackProcessing(state, scanCandidates(pi, state, { changedOnly: true }));
 
   const latestCtx = state.ctx;
   if (latestCtx) {
@@ -244,11 +255,20 @@ async function prepareCandidate(pi, state, candidatePath) {
   try {
     const stat = await safeStat(candidatePath);
     if (!stat?.isFile()) return;
-    if (!isRecentFile(stat, state.sinceMs)) return;
-    if (wasCreatedDuringAgentRun(stat, state)) return;
+    const signature = fileSignature(stat);
+    if (state.fileSignatures.get(key) === signature) return;
+    if (!isRecentFile(stat, state.sinceMs)) {
+      state.fileSignatures.set(key, signature);
+      return;
+    }
+    if (wasCreatedDuringAgentRun(stat, state)) {
+      state.fileSignatures.set(key, signature);
+      return;
+    }
     if (!state.ctx?.isIdle()) return;
 
-    await runAgentScreens(pi, ["prepare", candidatePath, "--target", TARGET, "--json"]);
+    await runScreenshotter(pi, ["prepare", candidatePath, "--target", TARGET, "--profile", state.profile || DEFAULT_PROFILE, "--json"]);
+    state.fileSignatures.set(key, signature);
     await refreshReadyCount(pi, state);
     if (state.ctx) updateUi(state.ctx, state);
   } catch (error) {
@@ -259,17 +279,7 @@ async function prepareCandidate(pi, state, candidatePath) {
   }
 }
 
-async function scanRecentCandidates(pi, state) {
-  const watchDir = state.watchDir;
-  const ctx = state.ctx;
-  if (!state.enabled || !watchDir || !ctx?.isIdle()) return;
-
-  const entries = await fsp.readdir(watchDir).catch(() => []);
-  const candidates = entries.map((entry) => path.join(watchDir, entry)).filter(isSupportedScreenshotPath);
-  for (const candidate of candidates) await prepareCandidate(pi, state, candidate);
-}
-
-async function pollRecentCandidates(pi, state) {
+async function scanCandidates(pi, state, { changedOnly = false } = {}) {
   const watchDir = state.watchDir;
   const ctx = state.ctx;
   if (!state.enabled || !watchDir || !ctx?.isIdle()) return;
@@ -278,16 +288,18 @@ async function pollRecentCandidates(pi, state) {
   for (const entry of entries) {
     const candidate = path.join(watchDir, entry);
     if (!isSupportedScreenshotPath(candidate)) continue;
+    if (changedOnly && !(await hasChanged(candidate, state))) continue;
 
-    const stat = await safeStat(candidate);
-    if (!stat?.isFile()) continue;
-
-    const signature = fileSignature(stat);
-    if (state.fileSignatures.get(candidate) === signature) continue;
-
-    state.fileSignatures.set(candidate, signature);
     await prepareCandidate(pi, state, candidate);
   }
+}
+
+async function hasChanged(candidatePath, state) {
+  const stat = await safeStat(candidatePath);
+  if (!stat?.isFile()) return false;
+
+  const key = path.resolve(candidatePath);
+  return state.fileSignatures.get(key) !== fileSignature(stat);
 }
 
 async function snapshotFileSignatures(watchDir) {
@@ -298,14 +310,14 @@ async function snapshotFileSignatures(watchDir) {
     if (!isSupportedScreenshotPath(candidate)) continue;
 
     const stat = await safeStat(candidate);
-    if (stat?.isFile()) signatures.set(candidate, fileSignature(stat));
+    if (stat?.isFile()) signatures.set(path.resolve(candidate), fileSignature(stat));
   }
   return signatures;
 }
 
 async function refreshReadyCount(pi, state) {
   try {
-    const result = await runAgentScreens(pi, ["list", "--target", TARGET, "--state", "ready", "--json"]);
+    const result = await runScreenshotter(pi, ["list", "--target", TARGET, "--state", "ready", "--json"]);
     state.readyCount = Array.isArray(result.screens) ? result.screens.length : 0;
   } catch {
     state.readyCount = 0;
@@ -314,10 +326,11 @@ async function refreshReadyCount(pi, state) {
 
 async function formatStatus(pi, state) {
   if (!state.enabled) return "off";
-  const status = await runAgentScreens(pi, ["status", "--target", TARGET, "--tokens", "--json"]).catch(() => undefined);
+  const status = await runScreenshotter(pi, ["status", "--target", TARGET, "--tokens", "--json"]).catch(() => undefined);
   const tokenMode = status?.tokenEstimates?.modes?.gpt5HighDetailTiles;
   return [
     "on",
+    `profile ${state.profile || DEFAULT_PROFILE}`,
     state.watchMode ? `mode ${state.watchMode}` : undefined,
     state.watchDir ? `watching ${state.watchDir}` : undefined,
     `${status?.ready ?? state.readyCount} ready`,
@@ -327,15 +340,15 @@ async function formatStatus(pi, state) {
   ].filter(Boolean).join(" · ");
 }
 
-async function runAgentScreens(pi, args) {
-  const command = agentScreensCommand();
+async function runScreenshotter(pi, args) {
+  const command = screenshotterCommand();
   const result = await pi.exec(command.executable, [...command.args, ...args], { timeout: 60_000 });
-  if (result.code !== 0) throw new Error((result.stderr || result.stdout || `agent-screens exited with ${result.code}`).trim());
+  if (result.code !== 0) throw new Error((result.stderr || result.stdout || `screenshotter exited with ${result.code}`).trim());
   return JSON.parse(result.stdout || "{}");
 }
 
-function agentScreensCommand() {
-  const configured = process.env.AGENT_SCREENS_CLI || cliPath;
+function screenshotterCommand() {
+  const configured = process.env.SCREENSHOTTER_CLI || cliPath;
   if (configured.endsWith(".js") || configured.endsWith(".mjs")) {
     return { executable: process.execPath, args: [configured] };
   }
@@ -411,6 +424,9 @@ function usage() {
   return [
     "screenshotter usage:",
     "/screenshotter on      enable live Cmd+Shift+3/4 screenshot capture",
+    "/screenshotter token   use the cost-focused percentage profile",
+    "/screenshotter balanced use the safer 2200px debug profile",
+    "/screenshotter readability use the default higher-fidelity profile",
     "/screenshotter off     disable capture and clear ready screenshots",
     "/screenshotter status  show watcher state",
     "/screenshotter clear   clear ready screenshots",

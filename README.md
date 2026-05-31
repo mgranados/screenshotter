@@ -1,220 +1,93 @@
-# agent-screens
+# screenshotter
 
-Local-first screenshot attachments for AI coding agents on macOS.
+Local macOS screenshots for coding agents.
 
-`agent-screens` takes native macOS screenshots, optimizes them locally, and hands them to agents as prompt-ready image files or clipboard images. It works with Codex, Claude Code, pi, shell scripts, and thin adapters for other CLIs.
+Take a screenshot. `screenshotter` optimizes it locally and copies it to your clipboard.
 
-- No login.
-- No cloud service.
-- No MCP required.
-- Original screenshots are never modified.
-- Optimized copies stay on your machine.
-
-## Requirements
-
-- macOS
-- Node.js 20+
-- A CLI or desktop agent that can accept image files, pasted images, or prompt text containing image paths
-
-## Install From Source
+## Install
 
 ```sh
-git clone https://github.com/<owner>/agent-screens.git
-cd agent-screens
-node bin/agent-screens.mjs status --json
+git clone https://github.com/mgranados/screenshotter.git
+cd screenshotter
+node bin/screenshotter.mjs doctor
 ```
 
-To put it on your PATH:
+Optional:
 
 ```sh
 mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/agent-screens.mjs" ~/.local/bin/agent-screens
-agent-screens status --json
+ln -sf "$PWD/bin/screenshotter.mjs" ~/.local/bin/screenshotter
 ```
 
-If `~/.local/bin` is not already on your PATH, add it in your shell profile.
-
-## Fastest Start
-
-### Codex Or Claude Desktop
-
-Take a screenshot with `Cmd+Shift+3` or `Cmd+Shift+4`, then copy the optimized image to the clipboard:
+## Use
 
 ```sh
-agent-screens codex-app
-# or
-agent-screens claude-app
+screenshotter watch --verbose
 ```
 
-Paste into the prompt with `Cmd+V`.
+Take a screenshot with `Cmd+Shift+3` or `Cmd+Shift+4`, then paste into Codex, Claude, or another agent with `Cmd+V`.
 
-For file-picker or drag-drop fallback:
+For pi:
 
 ```sh
-agent-screens codex-app --reveal
-agent-screens claude-app --reveal
+pi install . -l
 ```
 
-### Codex CLI
+Then run `/screenshotter on`.
 
-Start a watcher:
+## Savings
+
+| Size | Original | Default | Token mode | Bandwidth saved / 1k | GPT-5.5 tokens saved | Claude Opus tokens saved |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pro Display XDR | 5.48 MB | 0.89 MB | 0.36 MB | 5.0 GB | 7,284 | 1,152 |
+| 16in MacBook Pro | 1.86 MB | 0.83 MB | 0.20 MB | 1.6 GB | 6,284 | 3,095 |
+| 14in MacBook Pro | 2.34 MB | 0.75 MB | 0.20 MB | 2.1 GB | 4,614 | 3,088 |
+| Window 1920x1200 | 1.04 MB | 0.40 MB | 0.20 MB | 0.8 GB | 1,048 | 1,438 |
+| Window 1440x900 | 0.63 MB | 0.38 MB | 0.20 MB | 0.4 GB | 73 | 94 |
+
+Average from 5 recent screenshots. Default preserves readability. Token mode resizes for lower API image-token cost.
+
+## Profiles
 
 ```sh
-agent-screens watch --target codex
+screenshotter watch --profile readability  # default
+screenshotter watch --profile balanced
+screenshotter watch --profile token
 ```
 
-Take a macOS screenshot, then run Codex through the wrapper:
+In pi: `/screenshotter readability`, `/screenshotter balanced`, or `/screenshotter token`.
+
+## Commands
 
 ```sh
-agent-screens codex -- "use the screenshot"
+screenshotter watch --verbose
+screenshotter clip --target codex-app
+screenshotter claude-app --verbose
+screenshotter prepare-latest --target manual --json
+screenshotter claim --target manual --json
+screenshotter bench --latest 20 --tokens --json
+screenshotter doctor
 ```
 
-The wrapper claims ready screenshots and passes them to `codex --image`.
-
-### Claude Code CLI
-
-Start a watcher:
+MCP, experimental:
 
 ```sh
-agent-screens watch --target claude-code
+codex mcp add screenshotter -- screenshotter mcp-server
+claude mcp add screenshotter -- screenshotter mcp-server
 ```
 
-Take a macOS screenshot, then run Claude through the wrapper:
+No symlink:
 
 ```sh
-agent-screens claude -- "use the screenshot"
+node bin/screenshotter.mjs watch --verbose
 ```
 
-The wrapper claims ready screenshots and appends their optimized image paths to the initial Claude prompt.
-
-### pi
-
-This repo includes a pi extension and skill:
-
-```sh
-pi -e .
-```
-
-Inside pi:
+Verbose runs write JSONL logs to:
 
 ```text
-/screenshotter on
+~/Library/Application Support/screenshotter/logs/events.jsonl
 ```
-
-Screenshots taken while pi is idle attach to the next interactive prompt.
-
-If pi is running from another package or checkout, point it at this CLI:
-
-```sh
-AGENT_SCREENS_CLI=agent-screens pi -e <path-to-pi-package>
-```
-
-## CLI API
-
-Adapters can treat `agent-screens` as a local executable API:
-
-```sh
-agent-screens prepare <image> [--target pi] [--profile token|balanced|readability] [--json]
-agent-screens prepare-latest [--target codex-app] [--profile token|balanced|readability] [--json]
-agent-screens list [--target pi] [--state ready] [--json]
-agent-screens claim [--target pi] [--max 4] [--json]
-agent-screens clear [--target pi] [--files] [--json]
-agent-screens status [--target pi] [--tokens] [--json]
-agent-screens copy [--format markdown|paths|json] [--clipboard]
-agent-screens clip [--target app] [--json]
-agent-screens reveal [--target app]
-agent-screens bench [--latest 10] [--profile token|balanced|readability] [--tokens] [--json]
-```
-
-Public lifecycle:
-
-```text
-prepare -> ready -> claim -> cleared
-```
-
-Compatibility aliases remain available for existing adapters: `stage`, `stage-latest`, `drain`, and `--status staged`.
-
-## Storage
-
-By default, data is stored in:
-
-```text
-~/Library/Application Support/agent-screens
-```
-
-Override it with:
-
-```sh
-AGENT_SCREENS_DATA_DIR=~/.agent-screens
-AGENT_SCREENS_OPTIMIZED_DIR=~/ScreenshotsForAgents
-```
-
-## Compression Policy
-
-There are three local profiles:
-
-- `balanced`: fast default, JPEG quality 50, max long edge 2200 px.
-- `token`: more aggressive sizing, JPEG quality 45, max long edge 1024 px.
-- `readability`: higher fidelity, JPEG quality 78, max long edge 4096 px.
-
-All profiles keep the original when JPEG would be larger and avoid WebP/MozJPEG/OCR/multi-candidate search during normal preparation.
-
-Local benchmark on 20 recent screenshots:
-
-| Metric | Result |
-| --- | ---: |
-| Average prepare time | 75.9 ms |
-| Median prepare time | 107.0 ms |
-| Size reduction | 73.9% |
-
-See [docs/performance.md](docs/performance.md).
-
-For retina screenshots, `npm run eval:text-scale` benchmarks full-image downscales against original text retention. Use `--engine vision` for a local Apple Vision OCR gate, then `--engine codex --model <cheap-vision-model> --allow-external` for a model-specific check. The current 20-screenshot Apple Vision run passed at 2200 px with p10 text retention above 90%, about 83% byte savings, and about 64% 32px-patch savings.
-
-## Cost Impact
-
-Screenshot-heavy agent workflows can spend real money on image input tokens. `agent-screens` helps by using `--profile token` to send fewer image tokens when the model bills from image dimensions.
-
-Estimate from a local 20-screenshot benchmark:
-
-- Token profile resize savings: 2,686.4 input tokens per screenshot in the most favorable patch/original-detail estimate.
-
-Estimated input-token savings:
-
-| Screens | Model / mode | Estimated resize savings |
-| ---: | --- | ---: |
-| 300 | GPT-5.5 / Opus standard $5/M | $4.03 |
-| 300 | GPT-5.5 fast $12.50/M | $10.07 |
-| 300 | Opus 4.7 fast $30/M | $24.18 |
-| 1,000 | GPT-5.5 / Opus standard $5/M | $13.43 |
-| 1,000 | GPT-5.5 fast $12.50/M | $33.58 |
-| 1,000 | Opus 4.7 fast $30/M | $80.59 |
-| 10,000 | GPT-5.5 / Opus standard $5/M | $134.32 |
-| 10,000 | GPT-5.5 fast $12.50/M | $335.79 |
-| 10,000 | Opus 4.7 fast $30/M | $805.91 |
-
-These are directional estimates, not billing guarantees. Actual savings depend on model image-token accounting, detail mode, cache behavior, and provider pricing.
-
-## Development
-
-```sh
-npm run check
-agent-screens bench --latest 10 --json
-agent-screens bench --latest 10 --profile token --tokens --json
-npm run eval:text-scale -- --engine vision --latest 20 --min-source-long-edge 3000 --edges 2400,2200,2000,1800
-npm run quality -- --image "/path/to/screenshot.png" --min-ssim 0.99
-```
-
-## Docs
-
-- [Architecture](docs/architecture.md)
-- [Adapter contract](docs/adapter-contract.md)
-- [pi screenshotter skill API](docs/pi-screenshotter-skill-api.md)
-- [Codex CLI](docs/codex.md)
-- [Claude](docs/claude.md)
-- [Performance](docs/performance.md)
-- [Release checklist](docs/release.md)
 
 ## License
 
-MIT
+MIT.
