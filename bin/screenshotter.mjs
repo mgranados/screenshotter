@@ -4,17 +4,20 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { appendFile, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
 const VERSION = "0.0.1";
 const SCHEMA_VERSION = 1;
-const BALANCED_MAX_LONG_EDGE_PX = 2200;
+const BALANCED_MAX_LONG_EDGE_PX = 3000;
+const BALANCED_JPEG_QUALITY = 85;
+const TOKEN_MAX_LONG_EDGE_PX = 2200;
+const TOKEN_JPEG_QUALITY = 50;
+const TOKEN_NO_RESIZE_JPEG_QUALITY = 75;
 const RETINA_DPI_THRESHOLD = 120;
 const RETINA_DOWNSCALE_FACTOR = 0.5;
 const MIN_RETINA_DOWNSCALE_LONG_EDGE_PX = 3000;
-const JPEG_QUALITY = 50;
 const SMALL_DIRECT_SEND_BYTES = 256 * 1024;
 const FILE_STABLE_INTERVAL_MS = 150;
 const FILE_STABLE_TIMEOUT_MS = 5000;
@@ -25,10 +28,8 @@ const LOCK_TIMEOUT_MS = 5000;
 const LOCK_STALE_MS = 30_000;
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const NATIVE_OPTIMIZER_SOURCE = join(ROOT_DIR, "scripts", "native-image-optimizer.swift");
+const MENU_BAR_CONTROLLER_SOURCE = join(ROOT_DIR, "scripts", "menu-bar-controller.swift");
 const DEFAULT_PROFILE = "readability";
-const TOKEN_LONG_EDGE_PERCENT = 40;
-const TOKEN_MIN_LONG_EDGE_PX = 1400;
-const TOKEN_MAX_LONG_EDGE_PX = 2200;
 const DEFAULT_OPTIMIZER = "sharp";
 const READABILITY_MAX_OUTPUT_BYTES = 1_000_000;
 const SHARP_JPEG_MIN_QUALITY = 85;
@@ -58,18 +59,17 @@ const OPTIMIZATION_PROFILES = {
   balanced: {
     profile: "balanced",
     maxLongEdge: BALANCED_MAX_LONG_EDGE_PX,
-    jpegQuality: JPEG_QUALITY,
+    jpegQuality: BALANCED_JPEG_QUALITY,
     smallDirectBytes: SMALL_DIRECT_SEND_BYTES,
-    retinaDownscale: true,
+    retinaDownscale: false,
     optimizer: DEFAULT_OPTIMIZER,
   },
   token: {
     profile: "token",
     maxLongEdge: TOKEN_MAX_LONG_EDGE_PX,
-    longEdgePercent: TOKEN_LONG_EDGE_PERCENT,
-    minLongEdge: TOKEN_MIN_LONG_EDGE_PX,
-    jpegQuality: 85,
-    smallDirectBytes: 128 * 1024,
+    jpegQuality: TOKEN_JPEG_QUALITY,
+    noResizeJpegQuality: TOKEN_NO_RESIZE_JPEG_QUALITY,
+    smallDirectBytes: 0,
     retinaDownscale: false,
     optimizer: DEFAULT_OPTIMIZER,
   },
@@ -84,6 +84,7 @@ const OPTIMIZATION_PROFILES = {
   },
 };
 const nativeOptimizerBinaries = new Map();
+const menuBarControllerBinaries = new Map();
 let sharpModulePromise;
 
 main().catch((error) => {
@@ -113,6 +114,10 @@ async function main() {
       return prepareLatestCommand(args);
     case "watch":
       return watchCommand(args);
+    case "toolbar":
+    case "menubar":
+    case "menu-bar":
+      return watchCommand({ ...args, toolbar: true });
     case "list":
       return listCommand(args);
     case "claim":
@@ -194,29 +199,120 @@ async function watchCommand(args) {
   const watchTarget = resolveWatchTarget(args);
   const target = watchTarget.target;
   const watchArgs = { ...args, target, clipboard: watchTarget.clipboard };
-  const options = optimizationOptions(args);
+  const watchState = {
+    enabled: true,
+    profile: args.profile ?? DEFAULT_PROFILE,
+    options: optimizationOptions(args),
+    ready: 0,
+    history: [],
+  };
   const watchDir = resolve(expandHome(args.dir ?? macScreenshotDir()));
   const watchStat = await safeStat(watchDir);
   if (!watchStat?.isDirectory()) throw new Error(`screenshot folder is not available: ${watchDir}`);
 
   const store = storePaths(args);
   await ensureStore(store);
-  await prewarmOptimizer(options);
-  const sinceMs = Date.now();
+  await prewarmOptimizer(watchState.options);
+  let sinceMs = Date.now();
   const pollIntervalMs = parsePositiveInteger(args["poll-ms"], DEFAULT_POLL_INTERVAL_MS);
   const processingPaths = new Set();
   const processingTasks = new Set();
   const fileSignatures = new Map();
+  const toolbarMode = Boolean(args.toolbar || args.menubar);
+  let menuBar;
   let watcher;
   let pollTimer;
+  let controlTimer;
+  let stopWatch;
 
-  writeText(`screenshotter watching ${watchDir} for target ${target}\n`);
-  writeText(`target source: ${watchTarget.source}${watchTarget.reason ? ` (${watchTarget.reason})` : ""}\n`);
+  writeText(`screenshotter ${toolbarMode ? "toolbar" : "watch"}\n`);
+  writeText(`watching: ${watchDir}\n`);
+  if (args.target && args.target !== "auto") writeText(`target: ${target}\n`);
   writeText(`store: ${store.dataDir}\n`);
-  writeText(`profile: ${formatProfileSummary(options)}\n`);
-  if (watchArgs.clipboard) writeText(`clipboard: ${watchArgs["dry-run"] ? "dry-run" : "copy optimized image on each screenshot"}\n`);
+  writeText(`profile: ${formatProfileSummary(watchState.options, { concise: true, includeProfileId: false })}\n`);
+  writeText(`clipboard: ${formatWatchDelivery(watchArgs)}\n`);
+
+  const countReady = async () => {
+    const db = await readDb(store);
+    return filterScreens(db.screens, { target, state: "ready" }).length;
+  };
+
+  const pushControlState = async () => {
+    if (!menuBar) return;
+    watchState.ready = await countReady().catch(() => 0);
+    menuBar.sendState({
+      enabled: watchState.enabled,
+      profile: watchState.profile,
+      ready: watchState.ready,
+      target,
+      history: watchState.history,
+    });
+  };
+
+  const snapshotFileSignatures = async () => {
+    fileSignatures.clear();
+    const entries = await readdir(watchDir).catch(() => []);
+    for (const entry of entries) {
+      const candidatePath = join(watchDir, entry);
+      if (!isSupportedScreenshotPath(candidatePath)) continue;
+      const fileStat = await safeStat(candidatePath);
+      if (fileStat?.isFile()) fileSignatures.set(resolve(candidatePath), fileSignature(fileStat));
+    }
+  };
+
+  const setCaptureEnabled = async (enabled) => {
+    if (watchState.enabled === enabled) return;
+    watchState.enabled = enabled;
+    if (enabled) {
+      sinceMs = Date.now();
+      await snapshotFileSignatures();
+    }
+    writeText(`capture ${watchState.enabled ? "on" : "off"}\n`);
+    await pushControlState();
+  };
+
+  const setWatchProfile = async (profile) => {
+    if (!Object.hasOwn(OPTIMIZATION_PROFILES, profile)) return;
+    watchState.profile = profile;
+    watchState.options = optimizationOptions({ ...args, profile });
+    await prewarmOptimizer(watchState.options);
+    writeText(`profile: ${formatProfileSummary(watchState.options, { concise: true, includeProfileId: false })}\n`);
+    await pushControlState();
+  };
+
+  const handleControlCommand = async (command) => {
+    switch (command?.type) {
+      case "toggle":
+        await setCaptureEnabled(!watchState.enabled);
+        return;
+      case "profile":
+        if (!watchState.enabled) await setCaptureEnabled(true);
+        await setWatchProfile(command.profile);
+        return;
+      case "quit":
+        stopWatch?.();
+        return;
+      default:
+        return;
+    }
+  };
+
+  if (toolbarMode) {
+    menuBar = await startMenuBarController(store, handleControlCommand, watchArgs);
+    if (menuBar) {
+      writeText("menu bar: ready\n");
+      await pushControlState();
+      controlTimer = setInterval(() => {
+        pushControlState().catch(() => undefined);
+      }, 5000);
+      controlTimer.unref?.();
+    } else {
+      writeText("menu bar: unavailable; continuing without menu bar controls\n");
+    }
+  }
 
   const prepareCandidate = async (candidatePath) => {
+    if (!watchState.enabled) return;
     if (!isSupportedScreenshotPath(candidatePath)) return;
     const key = resolve(candidatePath);
     if (processingPaths.has(key)) return;
@@ -232,10 +328,16 @@ async function watchCommand(args) {
         return;
       }
       const started = performance.now();
-      const result = await prepareOne(store, key, fileStat, target, options);
+      const result = await prepareOne(store, key, fileStat, target, watchState.options);
       const screen = result.screen;
       const clipboard = await maybeCopyWatchImage(watchArgs, screen);
       const durationMs = round(performance.now() - started, 1);
+      if (result.prepared && menuBar) {
+        watchState.history = [
+          compressionHistoryEntry(screen),
+          ...watchState.history,
+        ].slice(0, 3);
+      }
       fileSignatures.set(key, signature);
       await reportScreenEvent(watchArgs, store, "watch.prepare", screen, {
         prepared: result.prepared,
@@ -244,12 +346,8 @@ async function watchCommand(args) {
         clipboardError: clipboard.error,
         targetSource: watchTarget.source,
       });
-      writeText([
-        `${result.prepared ? "ready" : "seen"} ${screen.id}`,
-        `${formatBytes(screen.originalBytes)} -> ${formatBytes(screen.optimizedBytes)}`,
-        `in ${durationMs}ms`,
-        clipboard.label,
-      ].filter(Boolean).join(" ") + "\n");
+      writeText(formatWatchPrepareLine(result, screen, durationMs, clipboard.label, watchArgs));
+      await pushControlState();
     } catch (error) {
       console.error(`failed to prepare ${candidatePath}: ${formatError(error)}`);
     } finally {
@@ -290,11 +388,14 @@ async function watchCommand(args) {
   }
 
   await new Promise((resolvePromise) => {
-    process.once("SIGINT", resolvePromise);
-    process.once("SIGTERM", resolvePromise);
+    stopWatch = resolvePromise;
+    process.once("SIGINT", stopWatch);
+    process.once("SIGTERM", stopWatch);
   }).finally(async () => {
     watcher?.close();
     clearInterval(pollTimer);
+    clearInterval(controlTimer);
+    menuBar?.stop();
     await Promise.allSettled([...processingTasks]);
   });
 }
@@ -304,7 +405,7 @@ async function maybeCopyWatchImage(args, screen) {
   if (args["dry-run"]) return { status: "image-dry-run", label: "clipboard dry-run" };
   try {
     await copyImageToClipboard(screen.optimizedPath);
-    return { status: "image", label: "copied to clipboard" };
+    return { status: "image", label: "copied" };
   } catch (error) {
     return { status: "failed", label: "clipboard failed", error: formatError(error) };
   }
@@ -976,6 +1077,57 @@ function benchRowFromScreen(file, screen, options, durationMs, prepared) {
   };
 }
 
+function compressionHistoryEntry(screen) {
+  const originalBytes = screen.originalBytes ?? 0;
+  const optimizedBytes = screen.optimizedBytes ?? 0;
+  const savedPercent = originalBytes > 0
+    ? Math.max(0, round((1 - optimizedBytes / originalBytes) * 100, 1))
+    : 0;
+
+  return {
+    name: basename(screen.sourcePath ?? screen.optimizedPath ?? screen.id ?? "screenshot"),
+    savedPercent,
+    originalBytes,
+    optimizedBytes,
+    optimized: Boolean(screen.optimized),
+    optimizer: screen.optimizer ?? "unknown",
+    profile: screen.profile ?? null,
+  };
+}
+
+function formatCompressionSummary(screen) {
+  const originalBytes = screen.originalBytes ?? 0;
+  const optimizedBytes = screen.optimizedBytes ?? 0;
+  if (!screen.optimized) return `${formatBytes(originalBytes)} unchanged`;
+  const savedPercent = originalBytes > 0
+    ? Math.max(0, round((1 - optimizedBytes / originalBytes) * 100, 1))
+    : 0;
+  return `${formatBytes(originalBytes)} -> ${formatBytes(optimizedBytes)} (${formatPercent(savedPercent)} saved)`;
+}
+
+function formatWatchPrepareLine(result, screen, durationMs, clipboardLabel, args) {
+  const verbose = shouldVerbose(args);
+  return [
+    result.prepared ? "ready" : "seen",
+    profileDisplayName(screen.profile ?? DEFAULT_PROFILE),
+    verbose ? screen.id : undefined,
+    formatCompressionSummary(screen),
+    formatOptimizerSummary(screen, { verbose }),
+    `in ${durationMs}ms`,
+    clipboardLabel,
+  ].filter(Boolean).join(" ") + "\n";
+}
+
+function formatOptimizerSummary(screen, { verbose = false } = {}) {
+  if (!screen.optimized) return undefined;
+  if (!verbose && screen.jpegQuality) return `q${screen.jpegQuality}`;
+  if (!verbose) return undefined;
+  return [
+    screen.optimizer,
+    screen.jpegQuality ? `q${screen.jpegQuality}` : undefined,
+  ].filter(Boolean).join("/");
+}
+
 function benchRowFromNative(row, options, maxLongEdge) {
   if (row.error || !row.optimizedPath || !row.optimizedBytes) return undefined;
   const optimizedExt = extname(row.optimizedPath).toLowerCase();
@@ -1059,6 +1211,10 @@ async function optimizeForPrompt(store, inputPath, hash, sourceStat, sourceMetad
   const metadata = sourceMetadata ?? imageMetadata(inputPath);
   const resizeLongEdge = getResizeLongEdge(metadata, options);
   const needsResize = resizeLongEdge !== undefined;
+  const candidateOptions = {
+    ...options,
+    jpegQuality: effectiveJpegQuality(options, needsResize),
+  };
   const cacheResizeLabel = resizeLongEdge ?? options.maxLongEdge;
   const stem = hash.slice(0, 24);
 
@@ -1068,20 +1224,27 @@ async function optimizeForPrompt(store, inputPath, hash, sourceStat, sourceMetad
 
   if (JPEG_DERIVATIVE_EXTENSIONS.has(sourceExt)) {
     if (options.optimizer === "sharp") {
-      const sharp = await createSharpCandidate(store, inputPath, stem, resizeLongEdge, metadata, options);
+      const sharp = await createSharpCandidate(store, inputPath, stem, resizeLongEdge, metadata, candidateOptions);
       if (sharp && (needsResize || sharp.bytes < sourceStat.size)) return sharp;
     }
     if (options.optimizer !== "sips") {
-      const native = await createNativeCandidate(store, inputPath, stem, resizeLongEdge, metadata, options);
+      const native = await createNativeCandidate(store, inputPath, stem, resizeLongEdge, metadata, candidateOptions);
       if (native && (needsResize || native.bytes < sourceStat.size)) return native;
     }
-    const jpeg = await createSipsCandidate(inputPath, join(store.optimizedDir, `${stem}-max${cacheResizeLabel}-q${options.jpegQuality}.jpg`), ".jpg", resizeLongEdge, metadata, true, options);
+    const jpeg = await createSipsCandidate(inputPath, join(store.optimizedDir, `${stem}-max${cacheResizeLabel}-q${candidateOptions.jpegQuality}.jpg`), ".jpg", resizeLongEdge, metadata, true, candidateOptions);
     if (jpeg && (needsResize || jpeg.bytes < sourceStat.size)) return jpeg;
   }
 
   const fallback = await createFallbackCandidate(inputPath, store.optimizedDir, stem, sourceExt, metadata);
   if (!fallback) throw new Error(`Could not optimize ${inputPath}`);
   return fallback;
+}
+
+function effectiveJpegQuality(options, needsResize) {
+  if (needsResize || options.noResizeJpegQuality === undefined || options.noResizeJpegQuality === null) {
+    return options.jpegQuality;
+  }
+  return Math.max(options.jpegQuality, options.noResizeJpegQuality);
 }
 
 async function createSharpCandidate(store, inputPath, stem, resizeLongEdge, originalMetadata, rawOptions = {}) {
@@ -1304,6 +1467,9 @@ function normalizeOptimizationOptions(rawOptions = {}) {
     ? undefined
     : parsePositiveInteger(rawOptions.maxPatches, undefined);
   const jpegQuality = clamp(parsePositiveInteger(rawOptions.jpegQuality ?? fallback.jpegQuality, fallback.jpegQuality), 1, 100);
+  const noResizeJpegQuality = rawOptions.noResizeJpegQuality === undefined || rawOptions.noResizeJpegQuality === null
+    ? fallback.noResizeJpegQuality
+    : clamp(parsePositiveInteger(rawOptions.noResizeJpegQuality, undefined), 1, 100);
   const maxOutputBytes = rawOptions.maxOutputBytes === undefined || rawOptions.maxOutputBytes === null
     ? fallback.maxOutputBytes
     : parseNonNegativeInteger(rawOptions.maxOutputBytes, fallback.maxOutputBytes);
@@ -1317,6 +1483,7 @@ function normalizeOptimizationOptions(rawOptions = {}) {
     minLongEdge,
     maxPatches,
     jpegQuality,
+    noResizeJpegQuality,
     maxOutputBytes,
     smallDirectBytes,
     retinaDownscale: Boolean(rawOptions.retinaDownscale ?? fallback.retinaDownscale),
@@ -1341,6 +1508,7 @@ function optimizationKey(rawOptions = {}) {
     `minLongEdge=${options.minLongEdge ?? "none"}`,
     `maxPatches=${options.maxPatches ?? "none"}`,
     `jpegQuality=${options.jpegQuality}`,
+    `noResizeJpegQuality=${options.noResizeJpegQuality ?? "none"}`,
     `maxOutputBytes=${options.maxOutputBytes ?? "none"}`,
     `smallDirectBytes=${options.smallDirectBytes}`,
     `retinaDownscale=${options.retinaDownscale ? 1 : 0}`,
@@ -1380,6 +1548,100 @@ async function nativeOptimizerBinary(store) {
 
   nativeOptimizerBinaries.set(cacheKey, outputPath);
   return outputPath;
+}
+
+async function menuBarControllerBinary(store) {
+  const cacheKey = store.dataDir;
+  if (menuBarControllerBinaries.has(cacheKey)) return menuBarControllerBinaries.get(cacheKey) ?? undefined;
+
+  if (!commandExists("xcrun") || !(await existingFile(MENU_BAR_CONTROLLER_SOURCE))) {
+    menuBarControllerBinaries.set(cacheKey, null);
+    return undefined;
+  }
+
+  const helperDir = join(store.dataDir, "helpers");
+  const outputPath = join(helperDir, "menu-bar-controller");
+  const moduleCachePath = join(helperDir, "swift-module-cache");
+  await mkdir(moduleCachePath, { recursive: true });
+
+  if (await needsRefresh(outputPath, MENU_BAR_CONTROLLER_SOURCE)) {
+    const result = run("xcrun", [
+      "swiftc",
+      "-module-cache-path", moduleCachePath,
+      MENU_BAR_CONTROLLER_SOURCE,
+      "-o", outputPath,
+    ], {
+      env: { CLANG_MODULE_CACHE_PATH: moduleCachePath },
+      timeoutMs: 60_000,
+    });
+    if (result.status !== 0) {
+      menuBarControllerBinaries.set(cacheKey, null);
+      return undefined;
+    }
+  }
+
+  menuBarControllerBinaries.set(cacheKey, outputPath);
+  return outputPath;
+}
+
+async function startMenuBarController(store, handleCommand, args) {
+  const binary = await menuBarControllerBinary(store);
+  if (!binary) return undefined;
+
+  const child = spawn(binary, [], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let closed = false;
+  let stdoutBuffer = "";
+
+  child.on("close", () => {
+    closed = true;
+  });
+  child.on("error", (error) => {
+    closed = true;
+    if (shouldVerbose(args)) process.stderr.write(`[screenshotter toolbar] ${formatError(error)}\n`);
+  });
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk;
+    while (true) {
+      const newline = stdoutBuffer.indexOf("\n");
+      if (newline === -1) break;
+
+      const line = stdoutBuffer.slice(0, newline).trim();
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      if (!line) continue;
+
+      let command;
+      try {
+        command = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      Promise.resolve(handleCommand(command)).catch((error) => {
+        console.error(`toolbar command failed: ${formatError(error)}`);
+      });
+    }
+  });
+
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    if (shouldVerbose(args)) process.stderr.write(`[screenshotter toolbar] ${chunk}`);
+  });
+
+  return {
+    sendState(state) {
+      if (closed || !child.stdin.writable) return;
+      child.stdin.write(`${JSON.stringify({ type: "state", ...state })}\n`);
+    },
+    stop() {
+      if (closed) return;
+      child.stdin.end();
+      child.kill();
+    },
+  };
 }
 
 async function loadSharpModule() {
@@ -1794,6 +2056,8 @@ function parseArgs(argv) {
     else if (token === "--dry-run") args["dry-run"] = true;
     else if (token === "--reveal") args.reveal = true;
     else if (token === "--watch") args.watch = true;
+    else if (token === "--toolbar") args.toolbar = true;
+    else if (token === "--menubar") args.menubar = true;
     else if (token === "--tokens") args.tokens = true;
     else if (token === "--verbose") args.verbose = true;
     else if (token === "--log") args.log = true;
@@ -2075,24 +2339,65 @@ function doctorStatusLabel(status) {
   return status;
 }
 
-function formatProfileSummary(profile) {
+function formatProfileSummary(profile, { concise = false, includeProfileId = true } = {}) {
+  const hasSharpOutputTarget = profile.optimizer === "sharp" && profile.maxOutputBytes;
+  const name = includeProfileId
+    ? `${profileDisplayName(profile.profile)} (${profile.profile})`
+    : profileDisplayName(profile.profile);
+  const maxLongEdge = profile.maxLongEdge
+    ? concise ? `${profile.maxLongEdge}px` : `cap ${profile.maxLongEdge}px`
+    : undefined;
+  const noResizeQuality = profile.noResizeJpegQuality
+    ? concise ? `q${profile.noResizeJpegQuality} no-resize` : `q${profile.noResizeJpegQuality} when not resized`
+    : undefined;
+  const maxOutputBytes = hasSharpOutputTarget
+    ? concise ? `<=${formatBytes(profile.maxOutputBytes)}` : `max ${formatBytes(profile.maxOutputBytes)}`
+    : undefined;
+  const optimizer = concise && profile.optimizer === DEFAULT_OPTIMIZER ? undefined : profile.optimizer;
+
   return [
-    profile.profile,
+    name,
     profile.longEdgePercent ? `${profile.longEdgePercent}%` : undefined,
     profile.minLongEdge ? `floor ${profile.minLongEdge}px` : undefined,
-    profile.maxLongEdge ? `cap ${profile.maxLongEdge}px` : undefined,
-    `q${profile.jpegQuality}`,
-    profile.maxOutputBytes ? `max ${formatBytes(profile.maxOutputBytes)}` : undefined,
-    profile.optimizer,
+    maxLongEdge,
+    formatQualitySummary(profile),
+    noResizeQuality,
+    maxOutputBytes,
+    optimizer,
   ].filter(Boolean).join(" / ");
+}
+
+function formatQualitySummary(profile) {
+  const qualities = profile.optimizer === "sharp" && profile.maxOutputBytes
+    ? sharpQualityCandidates(profile)
+    : [profile.jpegQuality];
+  if (qualities.length === 1) return `q${qualities[0]}`;
+  return qualities.map((quality) => `q${quality}`).join("/");
+}
+
+function profileDisplayName(profile) {
+  switch (profile) {
+    case "readability":
+      return "Low";
+    case "balanced":
+      return "Mid";
+    case "token":
+      return "High";
+    default:
+      return profile ?? "unknown";
+  }
+}
+
+function formatWatchDelivery(args) {
+  if (!args.clipboard) return "off";
+  if (args["dry-run"]) return "dry-run";
+  return "optimized image";
 }
 
 function formatWatchTargetSummary(target) {
   return [
-    target.target,
     target.clipboard ? "clipboard" : "claim",
-    target.source,
-    target.reason,
+    target.target && target.target !== "default" ? target.target : undefined,
   ].filter(Boolean).join(" / ");
 }
 
@@ -2171,7 +2476,8 @@ Usage:
   screenshotter paste [--target app] [--json]
   screenshotter codex-app [--verbose] [--json] [--reveal]
   screenshotter claude-app [--json] [--reveal]
-  screenshotter watch [--target auto|codex-app|codex|pi|claude-app|claude-code] [--no-clipboard] [--poll-ms 1500] [--verbose]
+  screenshotter watch [--toolbar] [--target auto|codex-app|codex|pi|claude-app|claude-code] [--no-clipboard] [--poll-ms 1500] [--verbose]
+  screenshotter toolbar [watch options]
   screenshotter prepare <image> [--target pi] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
   screenshotter prepare-latest [--target codex-app] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
   screenshotter list [--target pi] [--state ready] [--json]
@@ -2194,9 +2500,9 @@ Environment:
   SCREENSHOTTER_LOG=1          Write JSONL event logs.
 
 Profiles:
-  token        Cost-focused: 40% long edge, floor 1400 px, cap 2200 px, JPEG quality 85.
-  balanced     Safer debugging: max long edge 2200 px, JPEG quality 50.
-  readability  Default high fidelity: max long edge 4096 px, JPEG quality 90.
+  readability  Low/default: max long edge 4096 px, JPEG quality 90/88/85, 1 MB target.
+  balanced     Mid: max long edge 3000 px, JPEG quality 85.
+  token        High: max long edge 2200 px, JPEG quality 50, or 75 when not resized.
 `;
 }
 
@@ -2376,6 +2682,12 @@ function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatPercent(value) {
+  const rounded = Math.round(value);
+  if (Math.abs(value - rounded) < 0.05) return `${rounded}%`;
+  return `${value.toFixed(1)}%`;
 }
 
 function formatError(error) {

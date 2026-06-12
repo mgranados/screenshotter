@@ -14,7 +14,7 @@ screenshotter watch --verbose
 Test:
 
 1. Take a screenshot with `Cmd+Shift+4`.
-2. Confirm the watcher prints a line like `ready scr_... 4.8 MB -> 316 KB ... copied to clipboard`.
+2. Confirm the watcher prints a line like `ready Low 4.8 MB -> 316 KB (93.6% saved) q88 ... copied`.
 3. Paste into Codex with `Cmd+V`.
 4. Ask Codex to describe the screen and verify it can read the important text.
 5. Take a second similar screenshot and confirm the watcher processes only the new file.

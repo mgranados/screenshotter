@@ -214,8 +214,8 @@ Use target `pi` for all commands.
 Commands:
 - `screenshotter screenshot-dir --json` to find the native macOS screenshot folder.
 - `screenshotter prepare <path> --target pi --profile readability --json` when a new native screenshot is detected by default.
-- `screenshotter prepare <path> --target pi --profile balanced --json` only after the user switches to the safer debugging profile.
-- `screenshotter prepare <path> --target pi --profile token --json` only after the user switches to the cost-focused profile.
+- `screenshotter prepare <path> --target pi --profile balanced --json` only after the user switches to the mid 3000 px profile.
+- `screenshotter prepare <path> --target pi --profile token --json` only after the user switches to the aggressive readable 2200 px profile.
 - `screenshotter list --target pi --state ready --json` to count ready screenshots.
 - `screenshotter claim --target pi --max 4 --fresh-ms 600000 --json` immediately before the next interactive prompt.
 - `screenshotter clear --target pi --json` for `/screenshotter clear` and `/screenshotter off`.

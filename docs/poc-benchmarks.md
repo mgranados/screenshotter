@@ -49,7 +49,7 @@ Notes:
 
 Batching Apple Vision is worth doing for the eval harness. It is not relevant to normal `prepare`, because OCR is intentionally not in the hot path.
 
-## Aggressive Downscale
+## High-Compression Downscale
 
 | Max long edge | Byte savings | Text retention |
 | ---: | ---: | --- |
@@ -59,7 +59,7 @@ Batching Apple Vision is worth doing for the eval harness. It is not relevant to
 | 1800 px | 87.2% | 88.2% p10 / 94.7% median / fail |
 | 1600 px | 89.6% | 89.8% p10 / 94.2% median / fail |
 
-Recommendation: keep `readability` as the default for product use when tiny UI text must remain readable. Keep `balanced` at 2200 px as a middle ground, and keep `token` as the cost-focused profile. The next lower fixed readability candidate, 2000 px, saves only a few more byte/patch points and misses the p10 readability gate.
+Recommendation: keep `readability` as the default for product use when tiny UI text must remain readable. Use 3000 px as the mid profile and 2200 px as the aggressive readable profile. The next lower fixed readability candidate, 2000 px, saves only a few more byte/patch points and misses the p10 readability gate.
 
 ## Implementation Status
 

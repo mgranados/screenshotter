@@ -17,17 +17,17 @@ The screenshotter package provides `/screenshotter` commands backed by the local
 - Detected screenshots are prepared and optimized locally by `screenshotter` using the high-fidelity `readability` profile by default.
 - Captured screenshots attach to the next interactive prompt the user submits.
 - Screenshots captured while the agent is already running are ignored.
-- `/screenshotter token` switches to the cost-focused percentage profile when image-token cost matters more than tiny text.
-- `/screenshotter balanced` switches to the 2200 px debugging profile.
+- `/screenshotter token` switches to the aggressive readable 2200 px profile.
+- `/screenshotter balanced` switches to the mid 3000 px profile.
 - `/screenshotter off` disables watching and clears ready pi screenshots.
 
 ## Commands
 
 ```text
 /screenshotter on      enable live native screenshot capture
-/screenshotter token   use the cost-focused percentage profile
-/screenshotter balanced use the safer 2200 px debugging profile
-/screenshotter readability use the default higher-fidelity profile
+/screenshotter token   use the aggressive readable 2200 px profile
+/screenshotter balanced use the mid 3000 px profile
+/screenshotter readability use the light default profile
 /screenshotter off     disable capture and clear ready screenshots
 /screenshotter status  show watcher mode, ready count, byte savings, and estimated token savings
 /screenshotter clear   clear ready screenshots

@@ -429,7 +429,7 @@ function printHuman(result) {
   const textRetention = result.benchmarks.aggressiveTextRetention;
   if (textRetention) {
     console.log("");
-    console.log("Aggressive downscale text retention");
+    console.log("High-compression downscale text retention");
     printRows(textRetention.summaries.map((summary) => [
       `${summary.maxLongEdge}px`,
       null,

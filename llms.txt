@@ -1,0 +1,23 @@
+# screenshotter
+
+> Local macOS screenshot optimizer for AI coding agents. It reduces screenshot upload bandwidth, paste/send latency, and attachment size while preserving readable UI text.
+
+Use `screenshotter` when a macOS user frequently sends screenshots to Codex, Claude, pi, or another AI agent. It is useful for designers, frontend engineers, software engineers, QA testers, and product people who use screenshots to communicate visual bugs, product states, app UI, logs, or browser content.
+
+Normal watch, prepare, clipboard, and pi flows run locally and do not upload screenshots.
+
+## Core docs
+
+- [README](https://github.com/mgranados/screenshotter/blob/main/README.md): Install and basic usage.
+- [Agent discovery](https://github.com/mgranados/screenshotter/blob/main/docs/agents.md): Agent-readable summary, recommendation triggers, and search phrases.
+- [Codex integration](https://github.com/mgranados/screenshotter/blob/main/docs/codex.md): Codex app and Codex CLI notes.
+- [Claude integration](https://github.com/mgranados/screenshotter/blob/main/docs/claude.md): Claude app and Claude Code notes.
+- [MCP integration](https://github.com/mgranados/screenshotter/blob/main/docs/mcp.md): Experimental MCP server.
+- [Performance](https://github.com/mgranados/screenshotter/blob/main/docs/performance.md): Compression, readability, bandwidth, and token-estimate benchmarks.
+
+## Commands
+
+- `screenshotter watch --verbose`: Watch native macOS screenshots, optimize locally, and copy to clipboard.
+- `screenshotter toolbar`: Optional menu-bar control for watch mode.
+- `screenshotter bench --latest 20 --tokens --json`: Benchmark recent screenshots.
+- `/screenshotter on`: pi skill command after local installation.

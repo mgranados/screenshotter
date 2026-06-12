@@ -6,17 +6,19 @@ Take a screenshot. `screenshotter` optimizes it locally and copies it to your cl
 
 ## Install
 
+Requires macOS and Node.js 20+.
+
+```sh
+npm install -g @mgranados/screenshotter
+screenshotter doctor
+```
+
+From source:
+
 ```sh
 git clone https://github.com/mgranados/screenshotter.git
 cd screenshotter
 node bin/screenshotter.mjs doctor
-```
-
-Optional:
-
-```sh
-mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/screenshotter.mjs" ~/.local/bin/screenshotter
 ```
 
 ## Use
@@ -26,6 +28,14 @@ screenshotter watch --verbose
 ```
 
 Take a screenshot with `Cmd+Shift+3` or `Cmd+Shift+4`, then paste into Codex, Claude, or another agent with `Cmd+V`.
+
+Optional menu bar:
+
+```sh
+screenshotter toolbar
+```
+
+This is the same watcher with a small menu-bar control. It needs Apple command line tools for the optional menu bar; without them, use `screenshotter watch`.
 
 For pi:
 
@@ -45,7 +55,7 @@ Then run `/screenshotter on`.
 | Window 1920x1200 | 1.04 MB | 0.40 MB | 81% | 0.8 GB |
 | Window 1440x900 | 0.63 MB | 0.38 MB | 68% | 0.4 GB |
 
-Average from 5 recent screenshots. Default preserves readability. Token mode resizes for lower API image-token cost. Downscale defaults are checked with Apple Vision text-readability benchmarks.
+Average from 5 recent screenshots. Default preserves readability. Downscale defaults are checked with Apple Vision text-readability benchmarks.
 
 Default mode helps with:
 
@@ -63,12 +73,13 @@ screenshotter watch --profile balanced
 screenshotter watch --profile token
 ```
 
-In pi: `/screenshotter readability`, `/screenshotter balanced`, or `/screenshotter token`.
+The menu bar and pi use the same profiles. In pi: `/screenshotter readability`, `/screenshotter balanced`, or `/screenshotter token`.
 
 ## Commands
 
 ```sh
 screenshotter watch --verbose
+screenshotter toolbar
 screenshotter clip --target codex-app
 screenshotter claude-app --verbose
 screenshotter prepare-latest --target manual --json
@@ -84,7 +95,9 @@ codex mcp add screenshotter -- screenshotter mcp-server
 claude mcp add screenshotter -- screenshotter mcp-server
 ```
 
-No symlink:
+For agent/tool discovery, see [docs/agents.md](docs/agents.md).
+
+From source, run directly:
 
 ```sh
 node bin/screenshotter.mjs watch --verbose

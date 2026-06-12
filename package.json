@@ -4,7 +4,7 @@
   "private": false,
   "type": "module",
   "license": "MIT",
-  "description": "Local-first macOS screenshot attachments for AI coding agents.",
+  "description": "Local-first macOS screenshot optimizer for AI coding agents.",
   "homepage": "https://github.com/mgranados/screenshotter#readme",
   "repository": {
     "type": "git",
@@ -42,7 +42,8 @@
     "skills",
     "CHANGELOG.md",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "llms.txt"
   ],
   "publishConfig": {
     "access": "public"
@@ -64,7 +65,11 @@
     "ai-agents",
     "apple-vision",
     "codex",
+    "codex-cli",
+    "claude",
     "claude-code",
+    "mcp",
+    "screenshot-compression",
     "image-optimization",
     "macos"
   ],

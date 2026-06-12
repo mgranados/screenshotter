@@ -424,9 +424,9 @@ function usage() {
   return [
     "screenshotter usage:",
     "/screenshotter on      enable live Cmd+Shift+3/4 screenshot capture",
-    "/screenshotter token   use the cost-focused percentage profile",
-    "/screenshotter balanced use the safer 2200px debug profile",
-    "/screenshotter readability use the default higher-fidelity profile",
+    "/screenshotter token   use the aggressive readable 2200px profile",
+    "/screenshotter balanced use the mid 3000px profile",
+    "/screenshotter readability use the light default profile",
     "/screenshotter off     disable capture and clear ready screenshots",
     "/screenshotter status  show watcher state",
     "/screenshotter clear   clear ready screenshots",

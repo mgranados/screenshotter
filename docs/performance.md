@@ -2,9 +2,9 @@
 
 The default policy is the readability profile:
 
-- `readability`: JPEG quality 90, max long edge 4096 px, 1 MB byte target.
-- `token`: JPEG quality 85, 40% of source long edge, floor 1400 px, cap 2200 px.
-- `balanced`: JPEG quality 50, max long edge 2200 px, direct-copy sendable screenshots at or below 256 KB.
+- `readability`: Low/default, JPEG quality 90/88/85, max long edge 4096 px, 1 MB byte target.
+- `balanced`: Mid, JPEG quality 85, max long edge 3000 px.
+- `token`: High, JPEG quality 50 when resizing, JPEG quality 75 when no resize is needed, max long edge 2200 px.
 
 All profiles use Sharp/libvips by default, with native macOS ImageIO and `sips` fallbacks. The default JPEG path uses 4:4:4 chroma for UI text, Sharp quantisation table 3, strips metadata, keeps the original file when JPEG would be larger, and avoids WebP, AVIF, OCR, or slow MozJPEG during normal preparation.
 
@@ -48,7 +48,17 @@ Control runs on the latest 5-screenshot sample:
 | native ImageIO, readability full size, q88 | 88.1 ms | 83.6 ms | 5.77 MB | 63.3% | 0.0% |
 | native ImageIO, readability full size, q90 | 91.3 ms | 71.1 ms | 5.83 MB | 62.9% | 0.0% |
 
-The default now prioritizes reading tiny UI text and keeping files near 1 MB over image-token savings. Use `--profile token` when cost matters more than full screenshot readability, and use `--optimizer native` or `--optimizer sips` for comparison.
+The default now prioritizes reading tiny UI text and keeping files near 1 MB over image-token savings. Use `--profile token` when dimension savings matter more than full-resolution fidelity, and use `--optimizer native` or `--optimizer sips` for comparison.
+
+Menu labels use rounded latest-20 Sharp/libvips savings estimates:
+
+| Menu label | CLI profile | Setting | Estimate |
+| --- | --- | --- | ---: |
+| Low Compression (avg ~30%) | `readability` | 4096 px, q90/q88/q85 with 1 MB target | ~30% |
+| Mid Compression (avg ~45%) | `balanced` | 3000 px, q85 | ~45% |
+| High Compression (avg ~80%) | `token` | 2200 px, q50 when resizing, q75 otherwise | ~80% |
+
+The menu bar status item uses the camera icon plus a compact three-bar compression stack: one filled bar for Low, two for Mid, and three for High. The compression history shows actual per-screenshot savings.
 
 ## Token Estimates
 
@@ -60,22 +70,23 @@ The default now prioritizes reading tiny UI text and keeping files near 1 MB ove
 
 The estimates intentionally do not treat JPEG byte savings as token savings. Token savings appear when a profile changes image dimensions.
 
-The token profile is available when you want scripts to document that cost is more important than full-resolution readability:
+The token profile is available when you want scripts to document that compression and dimension savings are more important than full-resolution fidelity:
 
 ```sh
 screenshotter prepare "/path/to/screenshot.png" --profile token --json
 screenshotter bench --latest 100 --profile token --tokens --json
 ```
 
-Current latest-screenshot `token` profile comparison:
+Current latest-20 `token` profile comparison:
 
 | Metric | Result |
 | --- | ---: |
-| Prepare time | 50.1 ms |
-| Optimized size | 309 KB |
-| Size reduction | 85.4% |
+| Median prepare time | 40.6 ms |
+| Original total | 7.23 MB |
+| Optimized total | 1.80 MB |
+| Size reduction | 75.4% |
 | `gpt5HighDetailTiles` savings | 0.0% |
-| `patchBudget10000` savings | 83.1% |
+| `patchBudget10000` savings | 42.6% |
 
 On the latest full-desktop screenshot, the old token default produced `3456x2234 -> 1400x905` and `2.07 MB -> 309 KB`. That was good compression but did not preserve tiny menu/status text. The new readability default keeps `3456x2234` and produced `2.07 MB -> 1.17 MB`, which is the right tradeoff when every label matters.
 
@@ -87,7 +98,7 @@ Use the rival eval when changing defaults or tuning the token profile. It benchm
 npm run eval:rivals -- --latest 20 --quality-engine vision
 ```
 
-The built-in rivals compare smaller fixed `token` sizes, `balanced` sizes from 1600-2200 px, and the `readability` profile. The ranking favors API image-token savings first, then byte savings and speed, while excluding candidates that miss the configured p10 text-retention gate.
+The built-in rivals compare smaller fixed `token` sizes, fixed-edge debug sizes, and the `readability` profile. The ranking favors API image-token savings first, then byte savings and speed, while excluding candidates that miss the configured p10 text-retention gate.
 
 Useful variants:
 
@@ -148,7 +159,7 @@ Current local retina-only Apple Vision run:
 | 1500 px | 87.1% | 93.8% | 90.1% | 83.1% | Fails p10 |
 | 1400 px | 87.0% | 93.0% | 91.4% | 85.3% | Fails p10 |
 
-Practical readability profile: `balanced` uses 2200 px because it is the current best candidate from Apple Vision. A 10-screenshot sweep made 1600 px look viable, but the larger 20-screenshot run dropped below the 90% p10 gate. Keep 2200 px available for text-heavy debugging until a cheap model-backed Codex eval passes the same screenshot corpus at a smaller size.
+Practical high-compression profile: `token` uses 2200 px because it is the current smallest candidate from Apple Vision that cleared the p10 text-retention gate in this sweep. A 10-screenshot sweep made 1600 px look viable, but the larger 20-screenshot run dropped below the 90% p10 gate. Keep 2200 px available for text-heavy debugging until a cheap model-backed Codex eval passes the same screenshot corpus at a smaller size.
 
 ## Pokémon Sheet Stress Test
 
