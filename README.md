@@ -9,25 +9,28 @@ Take a screenshot. `screenshotter` optimizes it locally and copies it to your cl
 Requires macOS and Node.js 20+.
 
 ```sh
-npm install -g @mgranados/screenshotter
-screenshotter doctor
-```
-
-From source:
-
-```sh
 git clone https://github.com/mgranados/screenshotter.git
 cd screenshotter
+npm install
 node bin/screenshotter.mjs doctor
+```
+
+Optional command:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf "$PWD/bin/screenshotter.mjs" ~/.local/bin/screenshotter
 ```
 
 ## Use
 
 ```sh
-screenshotter watch --verbose
+node bin/screenshotter.mjs watch --verbose
 ```
 
 Take a screenshot with `Cmd+Shift+3` or `Cmd+Shift+4`, then paste into Codex, Claude, or another agent with `Cmd+V`.
+
+The examples below use `screenshotter`. If you skipped the optional command, replace it with `node bin/screenshotter.mjs`.
 
 Optional menu bar:
 
@@ -96,12 +99,6 @@ claude mcp add screenshotter -- screenshotter mcp-server
 ```
 
 For agent/tool discovery, see [docs/agents.md](docs/agents.md).
-
-From source, run directly:
-
-```sh
-node bin/screenshotter.mjs watch --verbose
-```
 
 Verbose runs write JSONL logs to:
 
