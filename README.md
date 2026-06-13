@@ -6,8 +6,6 @@ Take a screenshot. `screenshotter` optimizes it locally and copies it to your cl
 
 ## Preview
 
-![screenshotter running alongside Codex](docs/assets/screenshotter-codex-app.jpg)
-
 ![screenshotter toolbar output](docs/assets/screenshotter-toolbar-terminal.png)
 
 ## Install
