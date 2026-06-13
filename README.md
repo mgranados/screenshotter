@@ -4,6 +4,12 @@ Local macOS screenshots for coding agents.
 
 Take a screenshot. `screenshotter` optimizes it locally and copies it to your clipboard.
 
+## Preview
+
+![screenshotter running alongside Codex](docs/assets/screenshotter-codex-app.jpg)
+
+![screenshotter toolbar output](docs/assets/screenshotter-toolbar-terminal.png)
+
 ## Install
 
 Requires macOS and Node.js 20+.
