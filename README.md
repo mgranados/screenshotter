@@ -42,6 +42,8 @@ Optional menu bar:
 screenshotter toolbar
 ```
 
+![screenshotter toolbar menu](docs/assets/screenshotter-toolbar-menu.png)
+
 This is the same watcher with a small menu-bar control. It needs Apple command line tools for the optional menu bar; without them, use `screenshotter watch`.
 
 For pi:
