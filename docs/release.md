@@ -49,21 +49,21 @@
 The first public distribution should be npm:
 
 ```sh
-npm publish
+npm publish --access public
 ```
 
 Expected user install:
 
 ```sh
-npm install -g @mgranados/screenshotter
+npm install -g @marttinn/screenshotter
 screenshotter doctor
 ```
 
 After publishing, verify from a clean directory:
 
 ```sh
-npm view @mgranados/screenshotter version
-npx @mgranados/screenshotter version
+npm view @marttinn/screenshotter version
+npx @marttinn/screenshotter version
 ```
 
 ## Homebrew Later

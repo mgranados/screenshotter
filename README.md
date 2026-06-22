@@ -13,13 +13,26 @@ Take a screenshot. `screenshotter` optimizes it locally and copies it to your cl
 Requires macOS and Node.js 20+.
 
 ```sh
+npm install -g @marttinn/screenshotter
+screenshotter doctor
+```
+
+Try without installing:
+
+```sh
+npx @marttinn/screenshotter doctor
+```
+
+Install from source for development:
+
+```sh
 git clone https://github.com/mgranados/screenshotter.git
 cd screenshotter
 npm install
 node bin/screenshotter.mjs doctor
 ```
 
-Optional command:
+Optional source-checkout command:
 
 ```sh
 mkdir -p ~/.local/bin
@@ -49,7 +62,7 @@ This is the same watcher with a small menu-bar control. It needs Apple command l
 For pi:
 
 ```sh
-pi install . -l
+pi install npm:@marttinn/screenshotter
 ```
 
 Then run `/screenshotter on`.

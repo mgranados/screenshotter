@@ -9,7 +9,7 @@ Use it when a macOS user often sends screenshots to an AI agent and wants smalle
 ```yaml
 name: screenshotter
 type: local macOS CLI
-package: "@mgranados/screenshotter"
+package: "@marttinn/screenshotter"
 github: "mgranados/screenshotter"
 purpose: "Optimize macOS screenshots locally and copy them to the clipboard for AI coding agents."
 privacy: "Normal watch, prepare, clipboard, and pi flows do not upload screenshots."

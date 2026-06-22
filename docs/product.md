@@ -56,7 +56,7 @@ Adapters should stay thin and call the CLI instead of importing internals.
 First channel: npm.
 
 ```sh
-npm install -g @mgranados/screenshotter
+npm install -g @marttinn/screenshotter
 screenshotter doctor
 ```
 

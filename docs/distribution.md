@@ -10,14 +10,14 @@ Recommended release path:
 
 npm is the best first distribution channel because the tool is already a Node CLI with a `bin` entry and a small runtime dependency set.
 
-The unscoped `screenshotter` npm name is already published by another package. Keep `screenshotter` as the product and binary name, and publish under a scope such as `@mgranados/screenshotter` or an organization-owned scope.
+The unscoped `screenshotter` npm name is already published by another package. Keep `screenshotter` as the product and binary name, and publish under the existing user scope, `@marttinn/screenshotter`.
 
 Expected install:
 
 ```sh
-npm install -g @mgranados/screenshotter
+npm install -g @marttinn/screenshotter
 screenshotter doctor
-pi install npm:@mgranados/screenshotter
+pi install npm:@marttinn/screenshotter
 ```
 
 Before publishing:
@@ -25,7 +25,7 @@ Before publishing:
 ```sh
 npm run check
 npm run pack:dry-run
-npm publish
+npm publish --access public
 ```
 
 Keep `files` in `package.json` explicit so benchmark artifacts, local stores, and editor files cannot accidentally ship.
@@ -41,7 +41,7 @@ The npm package also carries the pi resources through the `package.json` manifes
 }
 ```
 
-That lets `pi install npm:@mgranados/screenshotter` load the `/screenshotter` command and the matching `screenshotter` skill together.
+That lets `pi install npm:@marttinn/screenshotter` load the `/screenshotter` command and the matching `screenshotter` skill together.
 
 ## GitHub Releases
 
