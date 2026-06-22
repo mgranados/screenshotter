@@ -1,5 +1,9 @@
 # screenshotter
 
+[![npm version](https://img.shields.io/npm/v/@marttinn/screenshotter.svg)](https://www.npmjs.com/package/@marttinn/screenshotter)
+[![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#install)
+
 Local macOS screenshots for coding agents.
 
 Take a screenshot. `screenshotter` optimizes it locally and copies it to your clipboard.
@@ -12,6 +16,8 @@ Take a screenshot. `screenshotter` optimizes it locally and copies it to your cl
 
 Requires macOS and Node.js 20+.
 
+[npm package](https://www.npmjs.com/package/@marttinn/screenshotter):
+
 ```sh
 npm install -g @marttinn/screenshotter
 screenshotter doctor
@@ -23,16 +29,17 @@ Try without installing:
 npx @marttinn/screenshotter doctor
 ```
 
-Install from source for development:
+Development checkout:
 
 ```sh
 git clone https://github.com/mgranados/screenshotter.git
 cd screenshotter
 npm install
+npm run check
 node bin/screenshotter.mjs doctor
 ```
 
-Optional source-checkout command:
+When running from source, replace `screenshotter` with `node bin/screenshotter.mjs`, or symlink it:
 
 ```sh
 mkdir -p ~/.local/bin
@@ -42,12 +49,10 @@ ln -sf "$PWD/bin/screenshotter.mjs" ~/.local/bin/screenshotter
 ## Use
 
 ```sh
-node bin/screenshotter.mjs watch --verbose
+screenshotter watch --verbose
 ```
 
 Take a screenshot with `Cmd+Shift+3` or `Cmd+Shift+4`, then paste into Codex, Claude, or another agent with `Cmd+V`.
-
-The examples below use `screenshotter`. If you skipped the optional command, replace it with `node bin/screenshotter.mjs`.
 
 Optional menu bar:
 
