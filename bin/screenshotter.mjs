@@ -8,7 +8,8 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.0.1";
+const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const VERSION = JSON.parse(fs.readFileSync(join(ROOT_DIR, "package.json"), "utf8")).version;
 const SCHEMA_VERSION = 1;
 const STATS_SCHEMA_VERSION = 1;
 const BALANCED_MAX_LONG_EDGE_PX = 3000;
@@ -33,7 +34,6 @@ const LOCK_HEARTBEAT_MS = 5000;
 const DEFAULT_READY_RETENTION_MS = 24 * 60 * 60_000;
 const DEFAULT_RECORD_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const DEFAULT_MAX_SCREEN_RECORDS = 500;
-const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const NATIVE_OPTIMIZER_SOURCE = join(ROOT_DIR, "scripts", "native-image-optimizer.swift");
 const MENU_BAR_CONTROLLER_SOURCE = join(ROOT_DIR, "scripts", "menu-bar-controller.swift");
 const APPLE_VISION_OCR_SOURCE = join(ROOT_DIR, "scripts", "apple-vision-ocr.swift");

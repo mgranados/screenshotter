@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { formatRemoteAttachmentClipboardText, formatScreenContextMarkdown } from "../bin/screenshotter.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const cli = join(root, "bin", "screenshotter.mjs");
 const mcp = join(root, "bin", "screenshotter-mcp.mjs");
 const benchmark = join(root, "scripts", "text-source-benchmark.mjs");
@@ -134,7 +135,7 @@ try {
   assert(existsSync(nativeFingerprintPath), "Swift helper cache must persist a source fingerprint");
   const expectedFingerprint = createHash("sha256")
     .update(readFileSync(join(root, "scripts", "native-image-optimizer.swift")))
-    .update(`\0${process.arch}\0${process.platform}\0${"0.0.1"}`)
+    .update(`\0${process.arch}\0${process.platform}\0${packageVersion}`)
     .digest("hex");
   assert(readFileSync(nativeFingerprintPath, "utf8").trim() === expectedFingerprint, "Swift helper cache key must include source contents");
   assert((statSync(join(concurrentStore, "screens.json")).mode & 0o777) === 0o600, "screen metadata must be user-readable only");

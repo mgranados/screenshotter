@@ -4,18 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning once it reaches `0.1.0`. Before that, minor versions may still include CLI contract changes.
 
-## Unreleased
+## 0.1.0 - 2026-07-11
 
 - Renamed the project, package, and CLI to `screenshotter`.
 - Added `screenshotter doctor` for first-run readiness checks.
-- Added product positioning and release criteria in `docs/product.md`.
-- Added auto target detection to `screenshotter watch`.
+- Added opt-in direct screen text capture through macOS Accessibility, with explicit OCR fallback modes.
+- Added companion Markdown and compressed image clipboard attachments for local coding agents.
+- Added auto target detection and app-aware text cleanup for browsers, terminals, and coding agents.
 - Added optional `screenshotter toolbar` menu-bar controls for watch mode.
-- Changed the default profile to high-fidelity `readability` so tiny UI text remains readable.
-- Added Sharp/libvips optimization as the default prepare path, with native ImageIO and `sips` fallbacks.
-- Added `--optimizer sharp|native|sips` for prepare and benchmark control runs.
-- Added token-aware benchmark output for common image-token and patch accounting modes.
-- Added batched Apple Vision OCR for text-scale downscale evaluation.
+- Added processing and ready-state toolbar animations plus historical compression statistics.
+- Added native ImageIO optimization by default, with optional Sharp/libvips and `sips` paths.
+- Added persistent event logs, automatic artifact retention, benchmarks, and adversarial text extraction tests.
 - Added pi `/screenshotter` extension and skill layout.
 
 ## 0.0.1
