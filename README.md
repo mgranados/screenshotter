@@ -4,34 +4,154 @@
 [![license](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#install)
 
-Local macOS screenshots for coding agents.
+Local-first macOS screenshots for coding agents. `screenshotter` compresses screenshots, captures useful screen context, and puts both on the clipboard ready to paste into Codex, Claude, or another agent.
 
-Take a screenshot. `screenshotter` optimizes it locally and copies it to your clipboard.
-
-## Demo
+No telemetry. Screenshot processing, text extraction, and storage all happen locally on your Mac.
 
 ![Screenshotter toolbar preparing a compressed screenshot and Accessibility Markdown for Codex and Claude](docs/assets/screenshotter-demo.gif)
-
-**The menu-bar icon animates while processing and confirms when both files are ready:** a compressed screenshot and a Markdown sidecar containing direct macOS Accessibility text, without OCR. The demo pastes the same bundle into Codex and Claude.
 
 ## Install
 
 Requires macOS and Node.js 20+.
 
-[npm package](https://www.npmjs.com/package/@marttinn/screenshotter):
-
 ```sh
 npm install -g @marttinn/screenshotter
-screenshotter doctor
+screenshotter doctor --prompt-permissions
 ```
 
-Try without installing:
+## Recommended setup
+
+This is the workflow shown in the demo:
 
 ```sh
-npx @marttinn/screenshotter doctor
+screenshotter toolbar --clipboard-mode attachments
 ```
 
-Development checkout:
+Then:
+
+1. Take a screenshot using your usual macOS action or shortcut.
+2. Wait for the menu-bar icon to confirm it is ready.
+3. Paste with `Cmd+V`.
+
+`screenshotter` reacts to Apple’s screenshot file marker, with the documented `Screenshot …` filename as a fallback—not to a particular keyboard shortcut. Default shortcuts, remapped shortcuts, and Screenshot.app all work when they save to your configured macOS screenshot folder.
+
+The clipboard contains two attachments:
+
+- a locally compressed image;
+- a small Markdown file with the frontmost app, window, and visible text from macOS Accessibility.
+
+OCR is off unless you explicitly enable it.
+
+## Prefer screenshots on the clipboard?
+
+If your screenshot action copies an image instead of saving a file, `screenshotter clipboard` can process it. With the default macOS shortcuts, holding `Control` selects this behavior:
+
+- `Ctrl+Shift+Cmd+3` copies the full screen;
+- `Ctrl+Shift+Cmd+4` copies a selected area.
+
+To optimize the image currently on the clipboard and put the smaller version back:
+
+```sh
+screenshotter clipboard
+```
+
+If your usual screenshot action writes to the clipboard, add `--clipboard-input` to the recommended toolbar command and leave it running:
+
+```sh
+screenshotter toolbar --clipboard-input --clipboard-mode attachments
+```
+
+Now any screenshot action that puts an image-only item on the clipboard can trigger processing; the keyboard combination itself is irrelevant. File copies and rich clipboard content such as URLs, HTML, RTF, or text are ignored. Wait for the menu-bar confirmation, then paste the optimized attachments with `Cmd+V`.
+
+## Useful variations
+
+```sh
+# Image only
+screenshotter toolbar
+
+# Same attachment workflow without the menu-bar UI
+screenshotter watch --clipboard-mode attachments
+
+# Smaller output
+screenshotter toolbar --profile balanced
+screenshotter toolbar --profile token
+
+# Accessibility text, then OCR only when direct text is unavailable
+screenshotter toolbar --text-provider auto --clipboard-mode attachments
+
+# Process the newest saved screenshot once
+screenshotter clip --clipboard-mode attachments
+```
+
+## Options
+
+Most options work with `toolbar`, `watch`, `clip`, `clipboard`, and `prepare`.
+
+| Option | What it does |
+| --- | --- |
+| `--profile readability` | Default; prioritizes readable text and UI detail. |
+| `--profile balanced` | Medium-size output. |
+| `--profile token` | Smallest built-in profile. |
+| `--with-text` | Captures visible text through macOS Accessibility. |
+| `--with-target-context` | Records the frontmost app and window under the pointer. |
+| `--text-provider accessibility` | Direct text only; this is the default with `--with-text`. |
+| `--text-provider auto` | Accessibility first, then Apple Vision OCR fallback. |
+| `--ocr` | Forces Apple Vision OCR. |
+| `--no-ocr` | Prevents OCR fallback. |
+| `--clipboard-mode image` | Copies only image data; the default. |
+| `--clipboard-mode attachments` | Captures direct text and app/window context, then copies the image and context Markdown file; recommended. |
+| `--clipboard-mode both` | Copies text and image data as separate pasteboard items. |
+| `--clipboard-mode files` | Copies local file references. |
+| `--clipboard-mode markdown` | Copies a text prompt containing local paths and context. |
+| `--clipboard-mode text` | Copies extracted text only. |
+| `--clipboard-mode codex-inline` | Activates Codex and pastes text followed by the image. |
+| `--clipboard-input` | Watches for screenshot-like image-only clipboard changes; ignores files and rich content. |
+| `--clipboard-poll-ms <ms>` | Tunes the native metadata-only change monitor; the default is 500 ms. Clipboard image data is read only after a change. |
+| `--no-clipboard` | Prepares screenshots without changing the clipboard. |
+| `--target <name>` | Labels prepared screenshots for a specific consumer. |
+| `--poll-ms <ms>` | Changes the fallback watcher and clipboard polling interval. |
+| `--verbose` | Prints timings and delivery details. |
+| `--json` | Returns machine-readable output for one-shot commands. |
+| `--dry-run` | Shows the planned result without clipboard delivery. |
+
+Fine-grained image controls are available when needed: `--optimizer`, `--max-long-edge`, `--long-edge-percent`, `--min-long-edge`, `--jpeg-quality`, `--max-output-bytes`, and `--max-patches`. Run `screenshotter help` for the complete command reference.
+
+## Other integrations
+
+Install the pi package and enable live capture:
+
+```sh
+pi install npm:@marttinn/screenshotter
+```
+
+Then run `/screenshotter on` in pi.
+
+Experimental MCP server:
+
+```sh
+codex mcp add screenshotter -- screenshotter mcp-server
+claude mcp add screenshotter -- screenshotter mcp-server
+```
+
+See [Codex usage](docs/codex.md), [Claude usage](docs/claude.md), and [agent integration](docs/agents.md) for adapter-specific workflows.
+
+## Data and maintenance
+
+Prepared images, context files, statistics, and optional logs live under:
+
+```text
+~/Library/Application Support/screenshotter
+```
+
+```sh
+screenshotter status --json
+screenshotter stats --json
+screenshotter gc --json
+```
+
+Ready records expire after 24 hours, claimed or cleared records after 30 days, and the store is bounded to 500 records by default.
+
+## Development
 
 ```sh
 git clone https://github.com/mgranados/screenshotter.git
@@ -41,154 +161,7 @@ npm run check
 node bin/screenshotter.mjs doctor
 ```
 
-When running from source, replace `screenshotter` with `node bin/screenshotter.mjs`, or symlink it:
-
-```sh
-mkdir -p ~/.local/bin
-ln -sf "$PWD/bin/screenshotter.mjs" ~/.local/bin/screenshotter
-```
-
-## Use
-
-```sh
-screenshotter watch --verbose
-```
-
-Take a screenshot with `Cmd+Shift+3` or `Cmd+Shift+4`, then paste into Codex, Claude, or another agent with `Cmd+V`.
-
-Optional menu bar:
-
-```sh
-screenshotter toolbar
-```
-
-![screenshotter toolbar menu](docs/assets/screenshotter-toolbar-menu.png)
-
-This is the same watcher with a small menu-bar control. It needs Apple command line tools for the optional menu bar; without them, use `screenshotter watch`.
-
-Screenshot preparation is pipelined: app detection runs while the screenshot finishes writing, then image compression runs alongside direct text extraction. OCR starts only when direct text is unavailable. A repeatable performance test keeps this path at least 20% faster than running those steps one by one; the current local result is about 36% faster.
-
-For pi:
-
-```sh
-pi install npm:@marttinn/screenshotter
-```
-
-Then run `/screenshotter on`.
-
-## Savings
-
-| Size | Original | Default | Size saved | Bandwidth saved / 1k |
-| --- | ---: | ---: | ---: | ---: |
-| Pro Display XDR 6016x3384 | 5.48 MB | 0.89 MB | 93% | 5.0 GB |
-| 16in MacBook Pro 3456x2234 | 1.86 MB | 0.83 MB | 89% | 1.6 GB |
-| 14in MacBook Pro 3024x1964 | 2.34 MB | 0.75 MB | 91% | 2.1 GB |
-| Window 1920x1200 | 1.04 MB | 0.40 MB | 81% | 0.8 GB |
-| Window 1440x900 | 0.63 MB | 0.38 MB | 68% | 0.4 GB |
-
-Average from 5 recent screenshots. Default preserves readability. Downscale defaults are checked with Apple Vision text-readability benchmarks.
-
-Default mode helps with:
-
-- Upload bandwidth: often `2-5 MB -> ~1-2 MB` with the native default; smaller targets are available with `--optimizer sharp` when Sharp is installed separately.
-- Paste/send latency: less image data for Codex or Claude to ingest.
-- Local storage: optimized copies are smaller.
-- Reliability: less likely to hit attachment limits.
-- Readability per byte: efficient encoding while keeping dimensions high.
-
-## Profiles
-
-```sh
-screenshotter watch --profile readability  # default
-screenshotter watch --profile balanced
-screenshotter watch --profile token
-```
-
-The menu bar and pi use the same profiles. In pi: `/screenshotter readability`, `/screenshotter balanced`, or `/screenshotter token`. Text is also opt-in: `/screenshotter text` enables direct providers only, while `/screenshotter ocr` explicitly adds OCR fallback.
-
-## Text extraction
-
-Text extraction is opt-in. `--with-text` reads visible text through macOS Accessibility and bundles it with the compressed screenshot.
-
-```sh
-screenshotter doctor --prompt-permissions
-screenshotter toolbar --with-text --with-target-context --clipboard-mode attachments
-```
-
-Grant Accessibility permission once to the terminal or app running `screenshotter`. OCR is not used by default. Enable it explicitly when needed:
-
-```sh
-screenshotter prepare-latest --ocr --json                 # OCR only
-screenshotter toolbar --with-text --text-provider auto    # Accessibility, then OCR fallback
-```
-
-## JavaScript API
-
-The package also exposes a small ESM API for tools that want the same prepared screen objects without shelling out:
-
-```js
-import { prepareLatestForClipboard, prepareImage } from "@marttinn/screenshotter";
-
-const prepared = await prepareImage("/path/to/screenshot.png", {
-  withText: true,
-  withTargetContext: true,
-});
-
-await prepareLatestForClipboard({
-  withText: true,
-  withTargetContext: true,
-  clipboardMode: "attachments",
-});
-```
-
-## Commands
-
-```sh
-screenshotter watch --verbose
-screenshotter watch --with-text --with-target-context --verbose
-screenshotter toolbar
-screenshotter clip --with-text --target codex-app
-screenshotter claude-app --verbose
-screenshotter prepare-latest --target manual --ocr --json
-screenshotter claim --target manual --json
-screenshotter gc --json
-screenshotter bench --latest 20 --tokens --json
-screenshotter doctor
-```
-
-## Historical savings
-
-Each newly prepared screenshot updates a persistent aggregate at:
-
-```text
-~/Library/Application Support/screenshotter/stats.json
-```
-
-Check lifetime data saved with:
-
-```sh
-screenshotter stats --json
-screenshotter status --json
-```
-
-Screen records are bounded to 500 by default. Ready records expire after 24 hours and cleared or claimed records after 30 days. `screenshotter gc --json` runs retention immediately and removes orphan optimized files; `SCREENSHOTTER_READY_RETENTION_MS`, `SCREENSHOTTER_RECORD_RETENTION_MS`, and `SCREENSHOTTER_MAX_SCREEN_RECORDS` override those defaults.
-
-MCP, experimental:
-
-```sh
-codex mcp add screenshotter -- screenshotter mcp-server
-claude mcp add screenshotter -- screenshotter mcp-server
-```
-
-For agent/tool discovery, see [docs/agents.md](docs/agents.md).
-
-Verbose runs write JSONL logs to:
-
-```text
-~/Library/Application Support/screenshotter/logs/events.jsonl
-```
-
-Each event includes stage timings, so slow target detection, text extraction, compression, or clipboard delivery can be identified directly.
+When running from source, replace `screenshotter` with `node bin/screenshotter.mjs`.
 
 ## License
 

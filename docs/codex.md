@@ -99,7 +99,7 @@ Then paste it in Codex with `Cmd+V`.
 To paste screen text plus the optimized screenshot:
 
 ```sh
-screenshotter codex-app --with-text --with-target-context --clipboard-mode attachments
+screenshotter codex-app --clipboard-mode attachments
 ```
 
 This collects direct Accessibility text and copies a markdown context file plus the compressed image file to the clipboard. Paste once with `Cmd+V`. Add `--text-provider auto` only when you explicitly want Apple Vision OCR fallback. Use `--clipboard-mode codex-inline` only as a fallback when Codex refuses the context file attachment.

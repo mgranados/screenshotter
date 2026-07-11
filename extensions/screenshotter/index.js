@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import { promises as fsp } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -12,19 +11,7 @@ const PROMPT_ATTACH_WAIT_MS = 1500;
 const POLL_INTERVAL_MS = 1500;
 const DEFAULT_PROFILE = "readability";
 const DEFAULT_TEXT_MAX_CHARS = 4000;
-const REMOTE_BUNDLE_PATTERN = /\[\[screenshotter-remote-v1\]\]\s*(\{[^\r\n]*\})\s*\[\[\/screenshotter-remote-v1\]\]/g;
-const REMOTE_BUNDLE_INTRO = "Screenshotter remote attachment bundle. Read the context and image before responding.";
-const MAX_REMOTE_BUNDLES = 4;
-const MAX_REMOTE_CONTEXT_BYTES = 256 * 1024;
-const MAX_REMOTE_IMAGE_BYTES = 2 * 1024 * 1024;
 const SCREENSHOT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".tif", ".tiff"]);
-const REMOTE_IMAGE_MIME_TYPES = new Map([
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".png", "image/png"],
-  [".webp", "image/webp"],
-  [".gif", "image/gif"],
-]);
 
 const extensionDir = path.dirname(fileURLToPath(import.meta.url));
 const cliPath = path.resolve(extensionDir, "..", "..", "bin", "screenshotter.mjs");
@@ -71,8 +58,6 @@ export default function screenshotterExtension(pi) {
 
   pi.on("input", async (event, ctx) => {
     state.ctx = ctx;
-    const remoteAttachments = await transformRemoteAttachmentInput(event, ctx);
-    if (remoteAttachments) return remoteAttachments;
     if (!state.enabled || event.source !== "interactive") return { action: "continue" };
 
     trackProcessing(state, scanCandidates(pi, state));
@@ -303,6 +288,7 @@ async function prepareCandidate(pi, state, candidatePath) {
       state.fileSignatures.set(key, signature);
       return;
     }
+    if (!(await isNativeMacScreenshotPath(pi, candidatePath))) return;
     if (wasCreatedDuringAgentRun(stat, state)) {
       state.fileSignatures.set(key, signature);
       return;
@@ -434,6 +420,20 @@ function isSupportedScreenshotPath(filePath) {
   return SCREENSHOT_EXTENSIONS.has(path.extname(filePath).toLowerCase());
 }
 
+async function isNativeMacScreenshotPath(pi, filePath) {
+  try {
+    const marker = await pi.exec("/usr/bin/xattr", [
+      "-p",
+      "com.apple.metadata:kMDItemIsScreenCapture",
+      filePath,
+    ]);
+    if (marker.code === 0 && marker.stdout.length > 0) return true;
+  } catch {
+    // Fall back to Apple's documented filename convention.
+  }
+  return /^(?:Screenshot|Screen Shot)(?:\s|$)/i.test(path.basename(filePath));
+}
+
 function fileSignature(stat) {
   return `${stat.size}:${stat.mtimeMs}`;
 }
@@ -476,75 +476,6 @@ function appendScreenshotText(promptText, screens) {
     "",
     ...snippets,
   ].filter((part) => part !== undefined && part !== null).join("\n");
-}
-
-async function transformRemoteAttachmentInput(event, ctx) {
-  if (event.source !== "interactive") return undefined;
-  const text = String(event.text ?? "");
-  const matches = [...text.matchAll(REMOTE_BUNDLE_PATTERN)];
-  if (matches.length === 0) return undefined;
-  if (matches.length > MAX_REMOTE_BUNDLES) {
-    notify(ctx, `remote screenshot bundle limit is ${MAX_REMOTE_BUNDLES}`, "warning");
-    return undefined;
-  }
-
-  const contextBlocks = [];
-  const images = [];
-  try {
-    for (const match of matches) {
-      const bundle = JSON.parse(match[1]);
-      const contextPath = requireRemoteBundlePath(bundle.contextPath, "contextPath");
-      const imagePath = requireRemoteBundlePath(bundle.imagePath, "imagePath");
-      const context = await readRemoteBundleFile(contextPath, MAX_REMOTE_CONTEXT_BYTES, "context");
-      const image = await readRemoteBundleFile(imagePath, MAX_REMOTE_IMAGE_BYTES, "image");
-      const mimeType = REMOTE_IMAGE_MIME_TYPES.get(path.extname(imagePath).toLowerCase());
-      if (!mimeType || (bundle.mimeType && bundle.mimeType !== mimeType)) {
-        throw new Error("remote screenshot image type was invalid");
-      }
-      contextBlocks.push(context.toString("utf8").trim());
-      images.push({ type: "image", data: image.toString("base64"), mimeType });
-    }
-  } catch (error) {
-    notify(ctx, `could not attach remote screenshot: ${formatError(error)}`, "warning");
-    return undefined;
-  }
-
-  const promptText = matches
-    .reduce((value, match) => value.replace(match[0], ""), text)
-    .replace(REMOTE_BUNDLE_INTRO, "")
-    .trim();
-  notify(ctx, `${images.length} remote screenshot${images.length === 1 ? "" : "s"} attached`);
-  return {
-    action: "transform",
-    text: [promptText, ...contextBlocks].filter(Boolean).join("\n\n"),
-    images: [...(event.images ?? []), ...images],
-  };
-}
-
-function requireRemoteBundlePath(value, field) {
-  if (typeof value !== "string" || !path.isAbsolute(value) || /[\0\r\n]/.test(value)) {
-    throw new Error(`remote screenshot ${field} was invalid`);
-  }
-  return value;
-}
-
-async function readRemoteBundleFile(filePath, maxBytes, label) {
-  const configuredRoot = process.env.SCREENSHOTTER_REMOTE_INBOX_ROOT;
-  const inboxRoot = path.resolve(configuredRoot || path.join(os.homedir(), ".cache", "screenshotter", "inbox"));
-  const [realRoot, realFile] = await Promise.all([
-    fsp.realpath(inboxRoot),
-    fsp.realpath(filePath),
-  ]);
-  const relative = path.relative(realRoot, realFile);
-  if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
-    throw new Error(`remote screenshot ${label} was outside the private inbox`);
-  }
-
-  const fileStat = await fsp.stat(realFile);
-  if (!fileStat.isFile() || fileStat.size === 0 || fileStat.size > maxBytes) {
-    throw new Error(`remote screenshot ${label} exceeded its size limit or was unavailable`);
-  }
-  return fsp.readFile(realFile);
 }
 
 function formatScreenshotTextBlock(screen, index) {

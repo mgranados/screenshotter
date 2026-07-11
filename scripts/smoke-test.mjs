@@ -47,6 +47,39 @@ try {
   const statusAfterPrepare = run(["status", "--data-dir", dataDir, "--json"]);
   assert(statusAfterPrepare.historical?.screensPrepared === 1, "status should include historical stats");
 
+  const originalClipboardFixture = process.env.SCREENSHOTTER_CLIPBOARD_IMAGE_PATH;
+  process.env.SCREENSHOTTER_CLIPBOARD_IMAGE_PATH = imagePath;
+  const clipboardPrepared = run([
+    "clipboard",
+    "--target", "smoke-clipboard-input",
+    "--dry-run",
+    "--data-dir", dataDir,
+    "--json",
+  ]);
+  assert(clipboardPrepared.screen?.sourcePath === "clipboard", "clipboard input should not retain its temporary source path");
+  assert(clipboardPrepared.screen?.sourceKind === "clipboard", "clipboard input should identify its source kind");
+  assert(clipboardPrepared.clipboard?.status === "image-dry-run", "clipboard input should copy the optimized image back by default");
+  restoreEnv("SCREENSHOTTER_CLIPBOARD_IMAGE_PATH", originalClipboardFixture);
+
+  const removedRemoteTarget = spawnSync(process.execPath, [
+    cli,
+    "prepare",
+    imagePath,
+    "--remote-target",
+    "unused-host",
+    "--dry-run",
+    "--data-dir",
+    dataDir,
+  ], { encoding: "utf8" });
+  assert(removedRemoteTarget.status !== 0, "removed --remote-target CLI option should fail");
+  assert(removedRemoteTarget.stderr.includes("Unknown option: --remote-target"), "removed CLI option should report an unknown option");
+
+  await assertRejects(
+    () => api.prepareImage(imagePath, { remoteTarget: "unused-host", dryRun: true, dataDir }),
+    "Unknown option: --remote-target",
+    "removed remoteTarget API option should fail",
+  );
+
   const textPrepared = run(["prepare", imagePath, "--target", "smoke-text", "--ocr", "--data-dir", dataDir, "--json"]);
   assert(textPrepared.screen?.ocr, "prepare --ocr should return OCR metadata");
   assert(typeof textPrepared.screen?.ocrTextLength === "number", "prepare --ocr should report OCR text length");
@@ -62,11 +95,18 @@ try {
   const markdownClip = run(["clip", "--dir", workDir, "--target", "smoke-clip-markdown", "--with-text", "--clipboard-mode", "markdown", "--dry-run", "--data-dir", dataDir, "--json"]);
   assert(markdownClip.clipboard === "markdown-dry-run", "clip --clipboard-mode markdown --dry-run should plan markdown clipboard payload");
 
-  const attachmentClip = run(["clip", "--dir", workDir, "--target", "smoke-clip-attachments", "--with-text", "--clipboard-mode", "attachments", "--dry-run", "--data-dir", dataDir, "--json"]);
+  const originalImplicitAttachmentText = process.env.SCREENSHOTTER_ACCESSIBILITY_TEXT;
+  const originalImplicitAttachmentTarget = process.env.SCREENSHOTTER_SCREEN_TARGET_JSON;
+  process.env.SCREENSHOTTER_ACCESSIBILITY_TEXT = "Implicit attachment text";
+  process.env.SCREENSHOTTER_SCREEN_TARGET_JSON = JSON.stringify({
+    frontmostApp: { name: "Implicit Attachment App", pid: 333 },
+  });
+  const attachmentClip = run(["clip", "--dir", workDir, "--target", "smoke-clip-attachments", "--clipboard-mode", "attachments", "--dry-run", "--data-dir", dataDir, "--json"]);
   assert(attachmentClip.clipboard === "attachments-dry-run", "clip --clipboard-mode attachments --dry-run should plan app attachment delivery");
-
-  const remoteAttachmentClip = run(["clip", "--dir", workDir, "--target", "smoke-clip-remote", "--with-text", "--clipboard-mode", "attachments", "--remote-target", "devbox-test", "--dry-run", "--data-dir", dataDir, "--json"]);
-  assert(remoteAttachmentClip.clipboard === "remote-attachments-dry-run", "clip --remote-target --dry-run should plan remote attachment delivery");
+  assert(attachmentClip.screen?.textContext?.text === "Implicit attachment text", "attachment mode should collect direct text without --with-text");
+  assert(attachmentClip.screen?.screenTarget?.frontmostApp?.name === "Implicit Attachment App", "attachment mode should collect target context without --with-target-context");
+  restoreEnv("SCREENSHOTTER_ACCESSIBILITY_TEXT", originalImplicitAttachmentText);
+  restoreEnv("SCREENSHOTTER_SCREEN_TARGET_JSON", originalImplicitAttachmentTarget);
 
   const directAttachmentClip = run(["clip", "--dir", workDir, "--target", "smoke-clip-direct-attachments", "--with-text", "--no-ocr", "--with-target-context", "--clipboard-mode", "attachments", "--dry-run", "--data-dir", dataDir, "--json"]);
   assert(directAttachmentClip.clipboard === "attachments-dry-run", "clip --clipboard-mode attachments --no-ocr --dry-run should plan direct-source app attachment delivery");
@@ -200,6 +240,16 @@ function run(args) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function assertRejects(operation, expectedMessage, message) {
+  try {
+    await operation();
+  } catch (error) {
+    assert(String(error?.message ?? error).includes(expectedMessage), message);
+    return;
+  }
+  throw new Error(message);
 }
 
 function restoreEnv(name, value) {

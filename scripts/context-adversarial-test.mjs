@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { formatRemoteAttachmentClipboardText, formatScreenContextMarkdown } from "../bin/screenshotter.mjs";
+import { formatScreenContextMarkdown } from "../bin/screenshotter.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
@@ -362,25 +362,6 @@ function assertMarkdownFencePreservesExtractedCode() {
   assert(markdown.includes(extracted), "markdown context must preserve extracted code fences exactly");
   assert(!markdown.includes("'''bash"), "markdown context must not rewrite backticks as apostrophes");
 
-  const remoteMarkdown = formatScreenContextMarkdown({
-    id: "fixture",
-    optimizedPath: "/Users/local/fixture.jpg",
-    sourcePath: "/Users/local/source.png",
-    textSources: [],
-  }, extracted, {
-    optimizedPath: "/home/remote/.cache/screenshotter/inbox/fixture.jpg",
-    sourcePath: undefined,
-  });
-  assert(remoteMarkdown.includes("/home/remote/.cache/screenshotter/inbox/fixture.jpg"), "remote context must reference the uploaded image");
-  assert(!remoteMarkdown.includes("/Users/local"), "remote context must not leak unusable local paths");
-
-  const remoteClipboard = formatRemoteAttachmentClipboardText({
-    contextPath: "/home/remote/.cache/screenshotter/inbox/context.md",
-    imagePath: "/home/remote/.cache/screenshotter/inbox/fixture.jpg",
-    mimeType: "image/jpeg",
-  });
-  assert(remoteClipboard.includes("[[screenshotter-remote-v1]]"), "remote clipboard transport must include a stable adapter marker");
-  assert(remoteClipboard.includes('"mimeType":"image/jpeg"'), "remote clipboard transport must preserve the image MIME type");
 }
 
 function runProcess(executable, args, env = {}) {

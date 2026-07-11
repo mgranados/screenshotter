@@ -27,6 +27,7 @@ const FILE_STABLE_TIMEOUT_MS = 5000;
 const DEFAULT_FRESH_MS = 10 * 60_000;
 const DEFAULT_CLAIM_MAX = 4;
 const DEFAULT_POLL_INTERVAL_MS = 1500;
+const DEFAULT_CLIPBOARD_POLL_INTERVAL_MS = 500;
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_STALE_MS = 30_000;
 const ARTIFACT_LOCK_TIMEOUT_MS = 90_000;
@@ -39,6 +40,7 @@ const MENU_BAR_CONTROLLER_SOURCE = join(ROOT_DIR, "scripts", "menu-bar-controlle
 const APPLE_VISION_OCR_SOURCE = join(ROOT_DIR, "scripts", "apple-vision-ocr.swift");
 const SCREEN_TARGET_SNAPSHOT_SOURCE = join(ROOT_DIR, "scripts", "screen-target-snapshot.swift");
 const MACOS_ACCESSIBILITY_TEXT_SOURCE = join(ROOT_DIR, "scripts", "macos-accessibility-text.swift");
+const CLIPBOARD_IMAGE_READER_SOURCE = join(ROOT_DIR, "scripts", "clipboard-image-reader.swift");
 const DEFAULT_PROFILE = "readability";
 const DEFAULT_OPTIMIZER = "native";
 const DEFAULT_OCR_LEVEL = "accurate";
@@ -46,8 +48,6 @@ const DEFAULT_OCR_LANGUAGES = ["en-US"];
 const DEFAULT_TEXT_PROVIDER = "accessibility";
 const DEFAULT_TEXT_SNIPPET_MAX_CHARS = 4000;
 const CODEX_APP_PASTE_DELAY_MS = 800;
-const REMOTE_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
-const REMOTE_ATTACHMENT_DIR_COMMAND = 'umask 077; dir="${XDG_CACHE_HOME:-$HOME/.cache}/screenshotter/inbox"; mkdir -p "$dir"; find "$dir" -type f -mtime +1 -delete 2>/dev/null || true; printf "%s" "$dir"';
 const READABILITY_MAX_OUTPUT_BYTES = 1_000_000;
 const SHARP_JPEG_MIN_QUALITY = 85;
 const SHARP_JPEG_CHROMA_SUBSAMPLING = "4:4:4";
@@ -73,11 +73,12 @@ const IMAGE_PASTEBOARD_TYPES_BY_EXTENSION = new Map([
   [".tiff", "public.tiff"],
   [".webp", "org.webmproject.webp"],
 ]);
-const WRAPPER_BOOLEAN_FLAGS = new Set(["--dry-run", "--json", "--verbose", "--log", "--no-log", "--no-clipboard", "--ocr", "--text", "--with-text", "--no-text", "--with-target-context", "--target-context", "--no-ocr", "--require-ocr", "--no-language-correction", "--prompt-permissions"]);
+const WRAPPER_BOOLEAN_FLAGS = new Set(["--dry-run", "--json", "--verbose", "--log", "--no-log", "--no-clipboard", "--clipboard-input", "--ocr", "--text", "--with-text", "--no-text", "--with-target-context", "--target-context", "--no-ocr", "--require-ocr", "--no-language-correction", "--prompt-permissions"]);
 const WRAPPER_VALUE_FLAGS = new Set([
   "--target",
   "--max",
   "--fresh-ms",
+  "--clipboard-poll-ms",
   "--data-dir",
   "--optimized-dir",
   "--profile",
@@ -89,7 +90,6 @@ const WRAPPER_VALUE_FLAGS = new Set([
   "--max-output-bytes",
   "--max-patches",
   "--clipboard-mode",
-  "--remote-target",
   "--ocr-level",
   "--ocr-languages",
   "--text-provider",
@@ -105,7 +105,6 @@ const API_OPTION_ALIASES = [
   ["maxOutputBytes", "max-output-bytes"],
   ["maxPatches", "max-patches"],
   ["clipboardMode", "clipboard-mode"],
-  ["remoteTarget", "remote-target"],
   ["textProvider", "text-provider"],
   ["textMaxChars", "text-max-chars"],
   ["ocrLevel", "ocr-level"],
@@ -151,7 +150,7 @@ const menuBarControllerBinaries = new Map();
 const appleVisionOcrBinaries = new Map();
 const screenTargetSnapshotBinaries = new Map();
 const macosAccessibilityTextBinaries = new Map();
-const remoteAttachmentDirs = new Map();
+const clipboardImageReaderBinaries = new Map();
 let sharpModulePromise;
 const maintainedStores = new Set();
 
@@ -192,6 +191,24 @@ export async function prepareLatestForClipboard(options = {}) {
   return publicResult({ ...result, clipboard }, projectionOptions(args));
 }
 
+export async function prepareClipboardForClipboard(options = {}) {
+  const args = apiArgs(options);
+  const captured = await captureClipboardImage(storePaths(args));
+  if (!captured.imagePath) throw new Error("The clipboard does not contain a screenshot-like image");
+  try {
+    const { result } = await preparePath(args, captured.imagePath, {
+      sourcePath: "clipboard",
+      sourceKind: "clipboard",
+    });
+    const clipboard = args["no-clipboard"]
+      ? { status: null, label: "", textCopied: false }
+      : await copyPreparedScreenIfClipboardUnchanged(result.screen, args, captured.changeCount);
+    return publicResult({ ...result, clipboard }, projectionOptions(args));
+  } finally {
+    await captured.cleanup();
+  }
+}
+
 function isCliEntryPoint() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -204,6 +221,9 @@ function isCliEntryPoint() {
 }
 
 function apiArgs(options = {}) {
+  if (Object.hasOwn(options, "remoteTarget") || Object.hasOwn(options, "remote-target")) {
+    throw new Error("Unknown option: --remote-target");
+  }
   const args = { ...options, _: Array.isArray(options._) ? options._ : [] };
   for (const [camelKey, cliKey] of API_OPTION_ALIASES) applyApiAlias(args, options, camelKey, cliKey);
   if (options.targetContext !== undefined && args["with-target-context"] === undefined) args["with-target-context"] = options.targetContext;
@@ -232,6 +252,9 @@ async function main() {
     case "clip":
     case "paste":
       return clipboardCommand(args);
+    case "clipboard":
+    case "prepare-clipboard":
+      return clipboardInputCommand(args);
     case "prepare":
       return prepareCommand(args);
     case "prepare-latest":
@@ -297,6 +320,15 @@ async function prepareLatestCommand(args) {
   return writeResult(args, result);
 }
 
+async function clipboardInputCommand(args) {
+  const result = await prepareClipboardForClipboard(args);
+  await reportScreenEvent(args, storePaths(args), "clipboard-input", result.screen, {
+    prepared: result.prepared,
+    clipboard: result.clipboard?.status,
+  });
+  return writeResult(args, result);
+}
+
 async function prepareLatest(args) {
   return (await prepareLatestWithStore(args)).result;
 }
@@ -309,7 +341,7 @@ async function prepareLatestWithStore(args) {
   return preparePath(args, sourcePath);
 }
 
-async function preparePath(args, input) {
+async function preparePath(args, input, sourceOptions = {}) {
   const sourcePath = resolve(expandHome(input));
   if (!isSupportedScreenshotPath(sourcePath)) throw new Error(`Unsupported screenshot type: ${sourcePath}`);
 
@@ -323,6 +355,7 @@ async function preparePath(args, input) {
   if (!sourceStat) throw new Error(`File did not become stable: ${sourcePath}`);
   const targetSnapshot = await targetSnapshotPromise;
   const result = await prepareOne(store, sourcePath, sourceStat, args.target ?? null, optimizationOptions(args), {
+    ...sourceOptions,
     text: {
       ...textContextOptions(args),
       forceRefresh: Boolean(targetSnapshot),
@@ -362,6 +395,7 @@ async function watchCommand(args) {
   });
   let sinceMs = Date.now();
   const pollIntervalMs = parsePositiveInteger(args["poll-ms"], DEFAULT_POLL_INTERVAL_MS);
+  const clipboardPollIntervalMs = parsePositiveInteger(args["clipboard-poll-ms"], DEFAULT_CLIPBOARD_POLL_INTERVAL_MS);
   const processingPaths = new Set();
   const processingTasks = new Set();
   const fileSignatures = new Map();
@@ -369,6 +403,9 @@ async function watchCommand(args) {
   let menuBar;
   let watcher;
   let pollTimer;
+  let clipboardMonitor;
+  let clipboardQueue = Promise.resolve();
+  let lastClipboardChangeCount = null;
   let controlTimer;
   let stopWatch;
   let menuAnimationSequence = 0;
@@ -379,6 +416,7 @@ async function watchCommand(args) {
   writeText(`store: ${store.dataDir}\n`);
   writeText(`profile: ${formatProfileSummary(watchState.options, { concise: true, includeProfileId: false })}\n`);
   writeText(`clipboard: ${formatWatchDelivery(watchArgs)}\n`);
+  if (args["clipboard-input"]) writeText("clipboard input: native change monitor ready\n");
 
   const pushControlState = async () => {
     if (!menuBar) return;
@@ -418,6 +456,9 @@ async function watchCommand(args) {
     if (enabled) {
       sinceMs = Date.now();
       await snapshotFileSignatures();
+      if (args["clipboard-input"]) {
+        lastClipboardChangeCount = await clipboardChangeCount(store).catch(() => lastClipboardChangeCount);
+      }
     }
     writeText(`capture ${watchState.enabled ? "on" : "off"}\n`);
     await pushControlState();
@@ -463,7 +504,7 @@ async function watchCommand(args) {
     }
   }
 
-  const prepareCandidate = async (candidatePath) => {
+  const prepareCandidate = async (candidatePath, sourceOptions = {}) => {
     if (!watchState.enabled) return;
     if (!isSupportedScreenshotPath(candidatePath)) return;
     const key = resolve(candidatePath);
@@ -503,6 +544,7 @@ async function watchCommand(args) {
       });
       const { targetSnapshot, fileStat } = captureInputs.value;
       if (!fileStat) return;
+      if (sourceOptions.sourceKind !== "clipboard" && !isNativeMacScreenshotPath(candidatePath)) return;
       const signature = fileSignature(fileStat);
       if (fileSignatures.get(key) === signature) return;
       if (Math.max(fileStat.birthtimeMs, fileStat.ctimeMs, fileStat.mtimeMs) < sinceMs - 1000) {
@@ -510,6 +552,7 @@ async function watchCommand(args) {
         return;
       }
       const prepared = await measureAsync(() => prepareOne(store, key, fileStat, target, watchState.options, {
+        ...sourceOptions,
         text: {
           ...watchState.textOptions,
           forceRefresh: Boolean(targetSnapshot),
@@ -521,8 +564,14 @@ async function watchCommand(args) {
       }));
       const result = prepared.value;
       const screen = result.screen;
-      const copied = await measureAsync(() => maybeCopyWatchClipboard(watchArgs, screen));
+      const copied = await measureAsync(() => maybeCopyWatchClipboard(watchArgs, screen, {
+        store,
+        expectedChangeCount: sourceOptions.clipboardChangeCount,
+      }));
       const clipboard = copied.value;
+      if (args["clipboard-input"] && clipboard.status && clipboard.status !== "failed" && clipboard.status !== "superseded" && !clipboard.status.endsWith("-dry-run")) {
+        lastClipboardChangeCount = await clipboardChangeCount(store).catch(() => lastClipboardChangeCount);
+      }
       const durationMs = round(performance.now() - started, 1);
       const concurrency = estimateConcurrencyPerformance(durationMs, {
         captureInputsMs: captureInputs.durationMs,
@@ -587,6 +636,27 @@ async function watchCommand(args) {
     for (const entry of entries) await prepareCandidate(join(watchDir, entry));
   };
 
+  const scanClipboard = async (captured) => {
+    const imagePath = captured?.path;
+    if (!imagePath) return;
+    if (!watchState.enabled || captured.changeCount === lastClipboardChangeCount) {
+      await rm(imagePath, { force: true });
+      return;
+    }
+    try {
+      lastClipboardChangeCount = captured.changeCount;
+      await prepareCandidate(imagePath, {
+        sourcePath: "clipboard",
+        sourceKind: "clipboard",
+        clipboardChangeCount: captured.changeCount,
+      });
+    } catch (error) {
+      if (shouldVerbose(watchArgs)) process.stderr.write(`[screenshotter] clipboard input failed: ${formatError(error)}\n`);
+    } finally {
+      await rm(imagePath, { force: true });
+    }
+  };
+
   const track = (task) => {
     processingTasks.add(task);
     task.finally(() => processingTasks.delete(task));
@@ -614,6 +684,21 @@ async function watchCommand(args) {
     startPolling(error);
   }
 
+  if (args["clipboard-input"]) {
+    lastClipboardChangeCount = await clipboardChangeCount(store).catch(() => null);
+    clipboardMonitor = await startClipboardImageMonitor(store, {
+      pollIntervalMs: clipboardPollIntervalMs,
+      onImage: (captured) => {
+        const queued = clipboardQueue.then(() => scanClipboard(captured));
+        clipboardQueue = queued.catch(() => undefined);
+        track(queued);
+      },
+      onError: (error) => {
+        if (shouldVerbose(watchArgs)) process.stderr.write(`[screenshotter] clipboard monitor: ${formatError(error)}\n`);
+      },
+    });
+  }
+
   await new Promise((resolvePromise) => {
     stopWatch = resolvePromise;
     process.once("SIGINT", stopWatch);
@@ -622,16 +707,24 @@ async function watchCommand(args) {
     watcher?.close();
     clearInterval(pollTimer);
     clearInterval(controlTimer);
+    clipboardMonitor?.stop();
     menuBar?.stop();
     await Promise.allSettled([...processingTasks]);
+    await clipboardMonitor?.cleanup();
   });
 }
 
-async function maybeCopyWatchClipboard(args, screen) {
+async function maybeCopyWatchClipboard(args, screen, { store, expectedChangeCount } = {}) {
   if (!args.clipboard) return { status: null, label: "" };
   const mode = clipboardDeliveryMode(args);
   if (args["dry-run"]) return { status: `${mode}-dry-run`, label: "clipboard dry-run" };
   try {
+    if (expectedChangeCount !== undefined) {
+      const currentChangeCount = await clipboardChangeCount(store);
+      if (currentChangeCount !== expectedChangeCount) {
+        return { status: "superseded", label: "clipboard changed; delivery skipped" };
+      }
+    }
     const copied = await copyScreenToClipboard(screen, args);
     return { status: copied.status, label: copied.label };
   } catch (error) {
@@ -650,7 +743,8 @@ async function prepareOne(store, sourcePath, sourceStat, target, rawOptions = {}
   const hash = source.hash;
   const now = new Date().toISOString();
   const optimizeKey = optimizationKey(options);
-  const lookup = { hash, target, optimizeKey, sourcePath, contextOptions };
+  const recordedSourcePath = rawContextOptions.sourcePath ?? sourcePath;
+  const lookup = { hash, target, optimizeKey, sourcePath: recordedSourcePath, contextOptions };
 
   const reused = await measureAsync(() => withStoreLock(store, async () => {
     const db = await readDb(store);
@@ -740,7 +834,8 @@ async function prepareOne(store, sourcePath, sourceStat, target, rawOptions = {}
   const screen = {
     id: `scr_${hash.slice(0, 12)}_${Date.now().toString(36)}`,
     hash,
-    sourcePath,
+    sourcePath: recordedSourcePath,
+    sourceKind: rawContextOptions.sourceKind ?? "file",
     optimizedPath: optimized.path,
     mimeType: optimized.mimeType,
     createdAt: new Date(Math.max(sourceStat.birthtimeMs, sourceStat.ctimeMs, sourceStat.mtimeMs)).toISOString(),
@@ -1190,6 +1285,11 @@ async function doctorCommand(args) {
     available: "accessibility text helper can be built",
     noXcrun: "xcrun not found; accessibility text provider will be unavailable",
     noSwiftc: "Swift compiler not found; accessibility text provider will be unavailable",
+  });
+  await addSwiftHelperCheck("clipboard image input", CLIPBOARD_IMAGE_READER_SOURCE, {
+    available: "clipboard image helper can be built",
+    noXcrun: "xcrun not found; clipboard image input will be unavailable",
+    noSwiftc: "Swift compiler not found; clipboard image input will be unavailable",
   });
   await addAccessibilityPermissionCheck(add, store, args);
 
@@ -2154,8 +2254,14 @@ function normalizePrepareContextOptions(rawOptions = {}) {
 
 function screenTargetOptions(args = {}) {
   return normalizeScreenTargetOptions({
-    enabled: Boolean(args["with-target-context"] || args["target-context"] || args.withTargetContext || args.targetContext),
+    enabled: shouldCollectScreenTarget(args),
   });
+}
+
+function shouldCollectScreenTarget(args = {}) {
+  if (args["with-target-context"] || args["target-context"] || args.withTargetContext || args.targetContext) return true;
+  const rawMode = args["clipboard-mode"] ?? args.clipboardMode;
+  return rawMode !== undefined && normalizeClipboardMode(rawMode) === "attachments";
 }
 
 function normalizeScreenTargetOptions(rawOptions = {}) {
@@ -2818,6 +2924,14 @@ async function macosAccessibilityTextBinary(store) {
   });
 }
 
+async function clipboardImageReaderBinary(store) {
+  return swiftHelperBinary(store, {
+    cache: clipboardImageReaderBinaries,
+    sourcePath: CLIPBOARD_IMAGE_READER_SOURCE,
+    outputName: "clipboard-image-reader",
+  });
+}
+
 async function swiftHelperBinary(store, { cache, sourcePath, outputName }) {
   if (!(await existingFile(sourcePath))) return undefined;
   const fingerprint = createHash("sha256")
@@ -2950,6 +3064,8 @@ async function prewarmOptimizer(options) {
 async function prewarmWatchResources(store, watchState, args = {}) {
   const started = performance.now();
   const tasks = [() => prewarmOptimizer(watchState.options).then(() => true)];
+
+  if (args["clipboard-input"]) tasks.push(() => clipboardImageReaderBinary(store).then(Boolean));
 
   if (watchState.screenTargetOptions?.enabled) {
     tasks.push(() => prewarmScreenTargetSnapshot(store));
@@ -3649,6 +3765,7 @@ function parseArgs(argv) {
     else if (token === "--log") args.log = true;
     else if (token === "--no-log") args["no-log"] = true;
     else if (token === "--no-clipboard") args["no-clipboard"] = true;
+    else if (token === "--clipboard-input") args["clipboard-input"] = true;
     else if (token === "--ocr") args.ocr = true;
     else if (token === "--text") args.text = true;
     else if (token === "--with-text") args["with-text"] = true;
@@ -3662,6 +3779,7 @@ function parseArgs(argv) {
     else if (token === "--token-estimates") args["token-estimates"] = true;
     else if (token.startsWith("--")) {
       const [key, inlineValue] = token.slice(2).split("=", 2);
+      if (key === "remote-target") throw new Error(`Unknown option: --${key}`);
       args[key] = inlineValue ?? argv[++index];
     } else {
       args._.push(token);
@@ -3996,7 +4114,6 @@ function formatWatchDelivery(args) {
   if (mode === "text") return "text";
   if (mode === "files") return "optimized image + text file";
   if (mode === "attachments") return "context file + optimized image";
-  if (mode === "remote-attachments") return `remote context + optimized image (${remoteAttachmentTarget(args)})`;
   if (mode === "markdown") return "markdown context";
   if (mode === "codex-inline") return "Codex app inline paste";
   return "optimized image";
@@ -4056,6 +4173,7 @@ function publicScreen(screen, options = {}) {
     id: screen.id,
     hash: screen.hash,
     sourcePath: screen.sourcePath,
+    sourceKind: screen.sourceKind ?? "file",
     optimizedPath: screen.optimizedPath,
     mimeType: screen.mimeType,
     createdAt: screen.createdAt,
@@ -4190,11 +4308,12 @@ function usage() {
 Usage:
   screenshotter codex [wrapper options] -- [codex args...]
   screenshotter claude [wrapper options] -- [claude args...]
-  screenshotter clip [--target app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--clipboard-mode image|text|both|files|attachments|markdown|codex-inline] [--remote-target ssh-host] [--json]
-  screenshotter paste [--target app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--clipboard-mode image|text|both|files|attachments|markdown|codex-inline] [--remote-target ssh-host] [--json]
+  screenshotter clip [--target app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--clipboard-mode image|text|both|files|attachments|markdown|codex-inline] [--json]
+  screenshotter paste [--target app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--clipboard-mode image|text|both|files|attachments|markdown|codex-inline] [--json]
+  screenshotter clipboard [--target app] [--with-text] [--with-target-context] [--no-clipboard] [--json]
   screenshotter codex-app [--with-text] [--with-target-context] [--verbose] [--json] [--reveal]
   screenshotter claude-app [--with-text] [--with-target-context] [--json] [--reveal]
-  screenshotter watch [--toolbar] [--target auto|codex-app|codex|pi|claude-app|claude-code] [--with-text] [--with-target-context] [--no-clipboard] [--poll-ms 1500] [--verbose]
+  screenshotter watch [--toolbar] [--target auto|codex-app|codex|pi|claude-app|claude-code] [--clipboard-input] [--clipboard-poll-ms 500] [--with-text] [--with-target-context] [--no-clipboard] [--poll-ms 1500] [--verbose]
   screenshotter toolbar [watch options]
   screenshotter prepare <image> [--target pi] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--ocr-level accurate|fast] [--ocr-languages en-US] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
   screenshotter prepare-latest [--target codex-app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
@@ -4218,7 +4337,6 @@ Environment:
   SCREENSHOTTER_OPTIMIZER      Use native, sharp, or sips. Native ImageIO is the default; sharp/libvips is opt-in.
   SCREENSHOTTER_VERBOSE=1      Print savings details to stderr and write event logs.
   SCREENSHOTTER_LOG=1          Write JSONL event logs.
-  SCREENSHOTTER_REMOTE_TARGET  Upload attachment bundles to this SSH host before clipboard handoff.
   SCREENSHOTTER_READY_RETENTION_MS   Ready-screen retention (default: 24 hours).
   SCREENSHOTTER_RECORD_RETENTION_MS  Cleared/claimed record retention (default: 30 days).
   SCREENSHOTTER_MAX_SCREEN_RECORDS   Maximum retained screen records (default: 500).
@@ -4234,9 +4352,10 @@ Text:
   --ocr forces Apple Vision OCR as the text provider.
   --no-ocr disables OCR fallback when using the auto provider.
   --text-max-chars caps extracted text before it is stored or returned (default: 4000).
-  --clipboard-mode attachments copies a markdown context file and optimized image file for app/web paste.
-  --remote-target uploads attachment bundles to a private cache on an SSH host for remote terminal agents.
+  --clipboard-mode attachments collects direct text and app/window context, then copies the markdown context file and optimized image.
   --clipboard-mode codex-inline pastes text inline, then the optimized image, into Codex as a fallback.
+  clipboard imports the current clipboard image, optimizes it, and copies the result back by default.
+  watch --clipboard-input also imports newly copied images; macOS does not identify screenshot-origin images separately.
 
 Target context:
   --with-target-context records frontmost app and the visible window under the pointer.
@@ -4391,7 +4510,6 @@ async function copyScreenToClipboard(screen, args = {}) {
     pasteboardType: imagePasteboardType(screen),
   };
 
-  if (mode === "remote-attachments") return copyScreenRemoteAttachmentsToClipboard(screen, args, text);
   if (mode === "attachments") return copyScreenAttachmentsToClipboard(screen, args, text);
   if (mode === "codex-inline") return pasteScreenInlineIntoCodexApp(text, image);
 
@@ -4448,114 +4566,6 @@ async function copyScreenAttachmentsToClipboard(screen, args, text) {
   };
 }
 
-async function copyScreenRemoteAttachmentsToClipboard(screen, args, text) {
-  const target = remoteAttachmentTarget(args);
-  if (!target) throw new Error("Remote attachment delivery requires --remote-target <ssh-host>");
-  if (!screen.optimizedPath) throw new Error("No optimized screenshot is available to upload");
-
-  const imageStat = await stat(screen.optimizedPath);
-  if (!imageStat.isFile() || imageStat.size === 0) throw new Error("Optimized screenshot is unavailable");
-  if (imageStat.size > REMOTE_ATTACHMENT_MAX_BYTES) {
-    throw new Error(`Optimized screenshot exceeds the ${formatBytes(REMOTE_ATTACHMENT_MAX_BYTES)} remote attachment limit`);
-  }
-
-  const remoteDir = remoteAttachmentDirs.get(target) ?? ensureRemoteAttachmentDir(target);
-  remoteAttachmentDirs.set(target, remoteDir);
-
-  const store = storePaths(args);
-  const id = screen.id || screen.hash?.slice(0, 12) || "screen";
-  const imageName = basename(screen.optimizedPath);
-  const contextName = `${id}-screen-context.md`;
-  const remoteImagePath = `${remoteDir}/${imageName}`;
-  const remoteContextPath = `${remoteDir}/${contextName}`;
-  const localContextPath = join(store.textDir, `${id}-remote-screen-context.md`);
-  const extractedText = formatScreenTextSnippet(screen, args);
-
-  await mkdir(store.textDir, { recursive: true });
-  await writeFile(localContextPath, formatScreenContextMarkdown(screen, extractedText, {
-    optimizedPath: remoteImagePath,
-    sourcePath: undefined,
-  }), { mode: 0o600 });
-
-  uploadRemoteAttachments(target, remoteDir, [localContextPath, screen.optimizedPath]);
-  secureRemoteAttachments(target, [remoteContextPath, remoteImagePath]);
-  await pbcopy(formatRemoteAttachmentClipboardText({
-    contextPath: remoteContextPath,
-    imagePath: remoteImagePath,
-    mimeType: screen.mimeType ?? mimeTypeForExtension(extname(screen.optimizedPath).toLowerCase()),
-  }));
-
-  return {
-    status: "remote-attachments",
-    label: "remote context and optimized image",
-    textCopied: Boolean(extractedText || text),
-  };
-}
-
-function ensureRemoteAttachmentDir(target) {
-  const result = run(remoteSshBinary(), remoteSshArgs(target, REMOTE_ATTACHMENT_DIR_COMMAND), { timeoutMs: 15_000 });
-  if (result.status !== 0) {
-    throw new Error(`Could not prepare remote attachment directory on ${target}: ${result.stderr || result.stdout || `ssh exited with ${result.status}`}`);
-  }
-
-  const remoteDir = result.stdout.trim().split(/\r?\n/).at(-1) ?? "";
-  if (!/^\/[A-Za-z0-9._@+/-]+$/.test(remoteDir)) {
-    throw new Error(`Remote attachment directory from ${target} was invalid`);
-  }
-  return remoteDir.replace(/\/+$/, "");
-}
-
-function uploadRemoteAttachments(target, remoteDir, localPaths) {
-  const destination = `${target}:${remoteDir}/`;
-  const result = run(remoteScpBinary(), [
-    "-q",
-    "-o", "BatchMode=yes",
-    "-o", "ConnectTimeout=8",
-    ...localPaths,
-    destination,
-  ], { timeoutMs: 30_000 });
-  if (result.status !== 0) {
-    throw new Error(`Could not upload screenshot attachments to ${target}: ${result.stderr || result.stdout || `scp exited with ${result.status}`}`);
-  }
-}
-
-function secureRemoteAttachments(target, remotePaths) {
-  const command = `chmod 600 -- ${remotePaths.map(shellQuote).join(" ")}`;
-  const result = run(remoteSshBinary(), remoteSshArgs(target, command), { timeoutMs: 15_000 });
-  if (result.status !== 0) {
-    throw new Error(`Could not secure screenshot attachments on ${target}: ${result.stderr || result.stdout || `ssh exited with ${result.status}`}`);
-  }
-}
-
-function remoteSshArgs(target, command) {
-  return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", target, command];
-}
-
-function remoteSshBinary() {
-  return process.env.SCREENSHOTTER_SSH_BIN || "ssh";
-}
-
-function remoteScpBinary() {
-  return process.env.SCREENSHOTTER_SCP_BIN || "scp";
-}
-
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", `'\\''`)}'`;
-}
-
-export function formatRemoteAttachmentClipboardText(bundle) {
-  return [
-    "Screenshotter remote attachment bundle. Read the context and image before responding.",
-    "[[screenshotter-remote-v1]]",
-    JSON.stringify({
-      contextPath: bundle.contextPath,
-      imagePath: bundle.imagePath,
-      mimeType: bundle.mimeType,
-    }),
-    "[[/screenshotter-remote-v1]]",
-  ].join("\n");
-}
-
 async function pasteScreenInlineIntoCodexApp(text, image) {
   if (text) {
     await pbcopy(text);
@@ -4597,18 +4607,7 @@ function clipboardMode(args = {}) {
 }
 
 function clipboardDeliveryMode(args = {}) {
-  const mode = clipboardMode(args);
-  return mode === "attachments" && remoteAttachmentTarget(args) ? "remote-attachments" : mode;
-}
-
-function remoteAttachmentTarget(args = {}) {
-  const configured = args["remote-target"] ?? args.remoteTarget ?? process.env.SCREENSHOTTER_REMOTE_TARGET;
-  if (configured === undefined || configured === null || configured === "") return undefined;
-  const target = String(configured).trim();
-  if (!/^[A-Za-z0-9._@-]+$/.test(target) || target.startsWith("-")) {
-    throw new Error(`Invalid remote target: ${configured}`);
-  }
-  return target;
+  return clipboardMode(args);
 }
 
 function normalizeClipboardMode(value) {
@@ -4670,7 +4669,7 @@ export function formatScreenContextMarkdown(screen, text, pathOverrides = {}) {
     "## Image",
     "",
     `- Optimized image: ${optimizedPath}`,
-    sourcePath ? `- Source image: ${sourcePath}` : undefined,
+    screen.sourceKind === "clipboard" ? "- Source: macOS clipboard" : (sourcePath ? `- Source image: ${sourcePath}` : undefined),
     frontmostApp?.name ? `- App: ${frontmostApp.name}` : undefined,
     pointerWindow?.windowTitle ? `- Pointer window: ${pointerWindow.windowTitle}` : undefined,
     shouldShowPointerApp ? `- Pointer window app: ${pointerAppName}` : undefined,
@@ -4802,6 +4801,103 @@ function pasteboardDataItem(data, pasteboardType) {
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || `osascript exited with ${result.status}`);
 }
 
+async function clipboardChangeCount(store) {
+  if (process.env.SCREENSHOTTER_CLIPBOARD_CHANGE_COUNT !== undefined) {
+    return Number(process.env.SCREENSHOTTER_CLIPBOARD_CHANGE_COUNT);
+  }
+  const binary = await clipboardImageReaderBinary(store);
+  if (!binary) throw new Error("clipboard image reader is unavailable");
+  const result = await runAsync(binary, ["--metadata"], { timeoutMs: 5000 });
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `clipboard image reader exited with ${result.status}`);
+  const metadata = parseJsonish(result.stdout);
+  return Number.isFinite(metadata.changeCount) ? metadata.changeCount : null;
+}
+
+async function startClipboardImageMonitor(store, { pollIntervalMs, onImage, onError }) {
+  const binary = await clipboardImageReaderBinary(store);
+  if (!binary) throw new Error("clipboard image monitor is unavailable");
+  const captureDir = await mkdtemp(join(tmpdir(), "screenshotter-clipboard-monitor-"));
+  const child = spawn(binary, ["--watch", captureDir, "--poll-ms", String(pollIntervalMs)], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stopped = false;
+  let stdoutBuffer = "";
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdoutBuffer += chunk;
+    while (true) {
+      const newline = stdoutBuffer.indexOf("\n");
+      if (newline === -1) break;
+      const line = stdoutBuffer.slice(0, newline).trim();
+      stdoutBuffer = stdoutBuffer.slice(newline + 1);
+      if (!line) continue;
+      const captured = parseJsonish(line);
+      if (captured.path) onImage(captured);
+    }
+  });
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => onError(chunk.trim()));
+  child.on("error", onError);
+  child.on("close", (code) => {
+    if (!stopped && code !== 0) onError(`clipboard image monitor exited with ${code}`);
+  });
+
+  return {
+    stop() {
+      stopped = true;
+      child.kill();
+    },
+    cleanup() {
+      return rm(captureDir, { recursive: true, force: true });
+    },
+  };
+}
+
+async function captureClipboardImage(store) {
+  const captureDir = await mkdtemp(join(tmpdir(), "screenshotter-clipboard-"));
+  const cleanup = () => rm(captureDir, { recursive: true, force: true });
+  const fixturePath = process.env.SCREENSHOTTER_CLIPBOARD_IMAGE_PATH;
+  if (fixturePath) {
+    const extension = extname(fixturePath).toLowerCase() || ".png";
+    const imagePath = join(captureDir, `clipboard${extension}`);
+    await copyFile(fixturePath, imagePath);
+    const fixtureChangeCount = Number(process.env.SCREENSHOTTER_CLIPBOARD_CHANGE_COUNT);
+    return {
+      imagePath,
+      changeCount: Number.isFinite(fixtureChangeCount) ? fixtureChangeCount : undefined,
+      cleanup,
+    };
+  }
+
+  const binary = await clipboardImageReaderBinary(store);
+  if (!binary) {
+    await cleanup();
+    throw new Error("clipboard image reader is unavailable");
+  }
+  const result = await runAsync(binary, [captureDir], { timeoutMs: 5000 });
+  if (result.status !== 0) {
+    await cleanup();
+    throw new Error(result.stderr || result.stdout || `clipboard image reader exited with ${result.status}`);
+  }
+  const captured = parseJsonish(result.stdout);
+  if (!captured.path) {
+    await cleanup();
+    return { imagePath: null, cleanup: async () => undefined };
+  }
+  return { imagePath: captured.path, changeCount: captured.changeCount, cleanup };
+}
+
+async function copyPreparedScreenIfClipboardUnchanged(screen, args, expectedChangeCount) {
+  if (expectedChangeCount !== undefined) {
+    const currentChangeCount = await clipboardChangeCount(storePaths(args));
+    if (currentChangeCount !== expectedChangeCount) {
+      return { status: "superseded", label: "clipboard changed; delivery skipped", textCopied: false };
+    }
+  }
+  return copyPreparedScreen(screen, args);
+}
+
 function imagePasteboardType(screen = {}) {
   const mimeType = String(screen.mimeType ?? "").toLowerCase();
   if (IMAGE_PASTEBOARD_TYPES_BY_MIME.has(mimeType)) return IMAGE_PASTEBOARD_TYPES_BY_MIME.get(mimeType);
@@ -4830,6 +4926,16 @@ function mimeTypeForExtension(ext) {
 
 function isSupportedScreenshotPath(filePath) {
   return SCREENSHOT_EXTENSIONS.has(extname(filePath).toLowerCase());
+}
+
+function isNativeMacScreenshotPath(filePath) {
+  const marker = run("/usr/bin/xattr", [
+    "-p",
+    "com.apple.metadata:kMDItemIsScreenCapture",
+    filePath,
+  ], { timeoutMs: 1000 });
+  if (marker.status === 0 && marker.stdout.length > 0) return true;
+  return /^(?:Screenshot|Screen Shot)(?:\s|$)/i.test(basename(filePath));
 }
 
 function fileSignature(fileStat) {

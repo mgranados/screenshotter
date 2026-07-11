@@ -1,6 +1,6 @@
 {
   "name": "@marttinn/screenshotter",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "main": "./index.mjs",
@@ -36,8 +36,8 @@
     "eval:rivals": "node scripts/rival-eval.mjs",
     "pack:dry-run": "npm_config_cache=${TMPDIR:-/tmp}/screenshotter-npm-cache npm pack --dry-run",
     "prepublishOnly": "npm run check && npm run pack:dry-run",
-    "check": "node --check index.mjs && node --check bin/screenshotter.mjs && node --check bin/screenshotter-mcp.mjs && node --check extensions/screenshotter/index.js && node --check scripts/smoke-test.mjs && node --check scripts/performance-smoke-test.mjs && node --check scripts/pi-extension-smoke-test.mjs && node --check scripts/remote-clipboard-smoke-test.mjs && node --check scripts/mcp-smoke-test.mjs && node --check scripts/context-adversarial-test.mjs && node --check scripts/accessibility-provider-eval.mjs && node --check scripts/swift-typecheck.mjs && node --check scripts/quality-check.mjs && node --check scripts/model-quality-check.mjs && node --check scripts/text-scale-eval.mjs && node --check scripts/text-source-benchmark.mjs && node --check scripts/poc-benchmarks.mjs && node --check scripts/rival-eval.mjs && npm run check:swift && npm run test",
-    "test": "node scripts/smoke-test.mjs && node scripts/performance-smoke-test.mjs && node scripts/pi-extension-smoke-test.mjs && node scripts/remote-clipboard-smoke-test.mjs && node scripts/mcp-smoke-test.mjs && node scripts/context-adversarial-test.mjs"
+    "check": "node --check index.mjs && node --check bin/screenshotter.mjs && node --check bin/screenshotter-mcp.mjs && node --check extensions/screenshotter/index.js && node --check scripts/smoke-test.mjs && node --check scripts/performance-smoke-test.mjs && node --check scripts/pi-extension-smoke-test.mjs && node --check scripts/mcp-smoke-test.mjs && node --check scripts/context-adversarial-test.mjs && node --check scripts/accessibility-provider-eval.mjs && node --check scripts/swift-typecheck.mjs && node --check scripts/quality-check.mjs && node --check scripts/model-quality-check.mjs && node --check scripts/text-scale-eval.mjs && node --check scripts/text-source-benchmark.mjs && node --check scripts/poc-benchmarks.mjs && node --check scripts/rival-eval.mjs && npm run check:swift && npm run test",
+    "test": "node scripts/smoke-test.mjs && node scripts/performance-smoke-test.mjs && node scripts/pi-extension-smoke-test.mjs && node scripts/mcp-smoke-test.mjs && node scripts/context-adversarial-test.mjs"
   },
   "files": [
     "index.mjs",

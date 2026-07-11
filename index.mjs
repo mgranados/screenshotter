@@ -1,5 +1,6 @@
 export {
   copyPreparedScreen,
+  prepareClipboardForClipboard,
   prepareImage,
   prepareLatestForClipboard,
   prepareLatestScreen,

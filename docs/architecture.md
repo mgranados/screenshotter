@@ -59,11 +59,9 @@ Text-aware outputs should preserve the same adapter contract:
 - pi prompt transforms append text snippets and attach images.
 - MCP and JSON clients receive the optimized image path plus `textContext`.
 
-Apps and web composers that need both text and image should use the generic attachment bundle. `--clipboard-mode attachments` puts a markdown context file and the optimized image file on the clipboard as file URLs. It stays opt-in and does not require app-specific UI automation. `codex-inline` remains available as a noisier Codex fallback.
+Apps and web composers that need both text and image should use the generic attachment bundle. `--clipboard-mode attachments` collects direct text and app/window context, then puts a markdown context file and the optimized image file on the clipboard as file URLs. It stays opt-in and does not require app-specific UI automation. `codex-inline` remains available as a noisier Codex fallback.
 
-Remote terminal agents use the same attachment abstraction with a different opt-in transport. `--remote-target` sends the two prepared files over SSH to a private remote inbox and copies a small remote-path marker. The Pi adapter resolves canonical inbox paths and turns the marker into native prompt text and image content. This avoids local `/Users/...` paths and avoids sending base64 image data through terminal paste.
-
-`--with-target-context` is separate from `--with-text`. It records app/window hints at prepare time so a provider can decide whether browser DOM, accessibility, or OCR is the right source.
+Outside attachment mode, `--with-target-context` records app/window hints at prepare time without requiring text collection.
 
 ## Storage
 

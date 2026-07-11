@@ -15,21 +15,13 @@ const fakeCli = join(workDir, "fake-screenshotter.mjs");
 const argLog = join(workDir, "fake-cli-args.jsonl");
 const imagePath = join(screenshotDir, "Screenshot.png");
 const capturedImagePath = join(screenshotDir, "Screenshot 2.png");
-const remoteInboxDir = join(workDir, "remote-inbox");
-const remoteContextPath = join(remoteInboxDir, "screen-context.md");
-const remoteImagePath = join(remoteInboxDir, "screen.jpg");
 const originalEnv = process.env.SCREENSHOTTER_CLI;
-const originalRemoteInboxRoot = process.env.SCREENSHOTTER_REMOTE_INBOX_ROOT;
 
 try {
   mkdirSync(screenshotDir, { recursive: true });
-  mkdirSync(remoteInboxDir, { recursive: true });
   writeFileSync(imagePath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lmV5xwAAAABJRU5ErkJggg==", "base64"));
-  writeFileSync(remoteImagePath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lmV5xwAAAABJRU5ErkJggg==", "base64"));
-  writeFileSync(remoteContextPath, "# Screen Context\n\nRemote terminal context\n");
   writeFileSync(fakeCli, fakeCliSource(), { mode: 0o755 });
   process.env.SCREENSHOTTER_CLI = fakeCli;
-  process.env.SCREENSHOTTER_REMOTE_INBOX_ROOT = remoteInboxDir;
   process.env.SCREENSHOTTER_TEST_CLI = cli;
   process.env.SCREENSHOTTER_TEST_DATA_DIR = dataDir;
   process.env.SCREENSHOTTER_TEST_SCREENSHOT_DIR = screenshotDir;
@@ -80,29 +72,6 @@ try {
   assert(events.has("input"), "extension should register input hook");
 
   await events.get("session_start")?.({}, ctx);
-  const remoteBundle = [
-    "inspect this remote screenshot",
-    "Screenshotter remote attachment bundle. Read the context and image before responding.",
-    "[[screenshotter-remote-v1]]",
-    JSON.stringify({ contextPath: remoteContextPath, imagePath: remoteImagePath, mimeType: "image/jpeg" }),
-    "[[/screenshotter-remote-v1]]",
-  ].join("\n");
-  const remoteInput = await events.get("input")({ source: "interactive", text: remoteBundle, images: [] }, ctx);
-  assert(remoteInput.action === "transform", "remote clipboard bundle should transform without enabling the local watcher");
-  assert(remoteInput.text.includes("inspect this remote screenshot"), "remote clipboard transform should preserve the user prompt");
-  assert(remoteInput.text.includes("Remote terminal context"), "remote clipboard transform should inline the context sidecar");
-  assert(!remoteInput.text.includes("screenshotter-remote-v1"), "remote clipboard transform should remove transport markers");
-  assert(remoteInput.images?.length === 1, "remote clipboard transform should attach the uploaded image");
-  assert(remoteInput.images[0].mimeType === "image/jpeg", "remote clipboard transform should infer the image MIME type");
-
-  const escapedBundle = [
-    "[[screenshotter-remote-v1]]",
-    JSON.stringify({ contextPath: remoteContextPath, imagePath, mimeType: "image/png" }),
-    "[[/screenshotter-remote-v1]]",
-  ].join("\n");
-  const escapedInput = await events.get("input")({ source: "interactive", text: escapedBundle, images: [] }, ctx);
-  assert(escapedInput.action === "continue", "remote clipboard transform should reject files outside its private inbox");
-
   await commands.get("screenshotter").handler("on", ctx);
   assert(notifications.some((item) => item.message === "screenshotter on"), "/screenshotter on should notify");
   assert(statuses.some((item) => item.key === "screenshotter" && item.value === "shot ON"), "status indicator should turn on");
@@ -164,8 +133,6 @@ try {
 } finally {
   if (originalEnv === undefined) delete process.env.SCREENSHOTTER_CLI;
   else process.env.SCREENSHOTTER_CLI = originalEnv;
-  if (originalRemoteInboxRoot === undefined) delete process.env.SCREENSHOTTER_REMOTE_INBOX_ROOT;
-  else process.env.SCREENSHOTTER_REMOTE_INBOX_ROOT = originalRemoteInboxRoot;
   delete process.env.SCREENSHOTTER_TEST_CLI;
   delete process.env.SCREENSHOTTER_TEST_DATA_DIR;
   delete process.env.SCREENSHOTTER_TEST_SCREENSHOT_DIR;

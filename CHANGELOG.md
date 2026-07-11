@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 This project follows semantic versioning once it reaches `0.1.0`. Before that, minor versions may still include CLI contract changes.
 
+## Unreleased
+
+## 0.1.1 - 2026-07-11
+
+- Added one-shot and opt-in watched macOS clipboard image input.
+- Ignored Finder file copies and rich clipboard content while preserving image-only screenshot capture.
+- Prevented newer clipboard changes from being overwritten or dropped during screenshot processing.
+- Simplified the README around the local attachment workflow and documented that screenshotter has no telemetry.
+- Removed the remote SSH attachment transport and its pi bundle parser.
+- Updated the GitHub Actions runtime actions while retaining the Node 20 and 22 package test matrix.
+
 ## 0.1.0 - 2026-07-11
 
 - Renamed the project, package, and CLI to `screenshotter`.

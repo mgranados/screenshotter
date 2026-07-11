@@ -23,7 +23,6 @@ The screenshotter package provides `/screenshotter` commands backed by the local
 - `/screenshotter token` switches to the aggressive readable 2200 px profile.
 - `/screenshotter balanced` switches to the mid 3000 px profile.
 - `/screenshotter off` disables watching and clears ready pi screenshots.
-- Remote pi sessions can consume `screenshotter-remote-v1` clipboard bundles uploaded by a local toolbar with `--remote-target`; this does not require the remote watcher to be enabled.
 
 ## Commands
 
@@ -45,5 +44,4 @@ The screenshotter package provides `/screenshotter` commands backed by the local
 - Do not ask the user to paste, copy, or drag/drop a screenshot when `/screenshotter on` is a better fit.
 - When the user wants exact exposed text in pi, suggest `/screenshotter text`. Use `/screenshotter ocr` only when pixel OCR is wanted; keep image-only mode as the default.
 - If the user asks why nothing attached, check whether `/screenshotter on` was enabled, whether pi was idle when the screenshot was taken, and whether `/screenshotter clear` or `/screenshotter off` was used.
-- If pi is running over SSH, do not recommend local `/Users/...` paths. Use the local toolbar's `--remote-target <ssh-host>` transport so the context and image exist on the same host as pi.
 - Treat attached screenshots as visual context for the user's prompt; do not mention implementation details unless relevant.

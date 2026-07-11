@@ -176,8 +176,7 @@ Suggested semantics:
 - `--no-ocr`: disable OCR fallback when using the auto provider.
 - `--with-target-context`: collect frontmost app and window-under-pointer metadata.
 - `--clipboard-mode files`: copy attachable file URLs for the optimized image and a text sidecar.
-- `--clipboard-mode attachments`: copy attachable file URLs for a markdown context file and optimized image.
-- `--remote-target host`: with attachment mode, upload both files over SSH and copy a remote-readable bundle marker instead of local file URLs.
+- `--clipboard-mode attachments`: collect direct text and target context, then copy attachable file URLs for a markdown context file and optimized image.
 - `--clipboard-mode markdown`: copy one plain-text prompt with extracted text plus optimized image path.
 - `--clipboard-mode codex-inline`: fallback Codex app automation that pastes text inline first, then the optimized image.
 
@@ -191,8 +190,6 @@ For desktop apps, `--with-text` should copy two pasteboard objects by default:
 Apps that accept both get both in one paste. Apps with narrower paste support use the representation they understand.
 
 Use `--clipboard-mode attachments` when both text context and image attachment must land in an app or web composer. It copies a `.md` context file and the optimized image file to the clipboard as file URLs, so the user can paste once into Codex, Claude, claude.ai, or another file-aware composer. Pair it with `--no-ocr` when OCR noise is worse than missing text. Use `codex-inline` only if Codex refuses the `.md` attachment.
-
-For an agent running across SSH, local file URLs are invalid. Add `--remote-target <ssh-host>` to attachment mode. Screenshotter uploads the files to `~/.cache/screenshotter/inbox` on that host, applies owner-only permissions, and puts a small versioned remote-path bundle on the clipboard. The Pi extension consumes this bundle into prompt text and image bytes even when its local screenshot watcher is off. Other remote agents can read the uploaded paths directly.
 
 Recommended text format:
 
