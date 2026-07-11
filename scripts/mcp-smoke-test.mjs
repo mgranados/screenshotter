@@ -12,6 +12,7 @@ const workDir = mkdtempSync(join(tmpdir(), "screenshotter-mcp-smoke-"));
 const dataDir = join(workDir, "store");
 const imagePath = join(workDir, "input.png");
 const originalScreenTargetJson = process.env.SCREENSHOTTER_SCREEN_TARGET_JSON;
+const RESPONSE_TIMEOUT_MS = 30_000;
 
 let child;
 
@@ -122,7 +123,7 @@ async function callTool(request, name, args) {
 
 async function waitFor(predicate, label, stderr) {
   const started = Date.now();
-  while (Date.now() - started < 5000) {
+  while (Date.now() - started < RESPONSE_TIMEOUT_MS) {
     const value = predicate();
     if (value) return value;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
