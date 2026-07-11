@@ -11,7 +11,20 @@ const MAX_READY_SCREENSHOTS = 4;
 const PROMPT_ATTACH_WAIT_MS = 1500;
 const POLL_INTERVAL_MS = 1500;
 const DEFAULT_PROFILE = "readability";
+const DEFAULT_TEXT_MAX_CHARS = 4000;
+const REMOTE_BUNDLE_PATTERN = /\[\[screenshotter-remote-v1\]\]\s*(\{[^\r\n]*\})\s*\[\[\/screenshotter-remote-v1\]\]/g;
+const REMOTE_BUNDLE_INTRO = "Screenshotter remote attachment bundle. Read the context and image before responding.";
+const MAX_REMOTE_BUNDLES = 4;
+const MAX_REMOTE_CONTEXT_BYTES = 256 * 1024;
+const MAX_REMOTE_IMAGE_BYTES = 2 * 1024 * 1024;
 const SCREENSHOT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".tif", ".tiff"]);
+const REMOTE_IMAGE_MIME_TYPES = new Map([
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".png", "image/png"],
+  [".webp", "image/webp"],
+  [".gif", "image/gif"],
+]);
 
 const extensionDir = path.dirname(fileURLToPath(import.meta.url));
 const cliPath = path.resolve(extensionDir, "..", "..", "bin", "screenshotter.mjs");
@@ -32,6 +45,8 @@ export default function screenshotterExtension(pi) {
     lastAgentBusyWindow: undefined,
     readyCount: 0,
     profile: DEFAULT_PROFILE,
+    withText: false,
+    noOcr: true,
   };
 
   pi.on("session_start", async (_event, ctx) => {
@@ -56,11 +71,19 @@ export default function screenshotterExtension(pi) {
 
   pi.on("input", async (event, ctx) => {
     state.ctx = ctx;
+    const remoteAttachments = await transformRemoteAttachmentInput(event, ctx);
+    if (remoteAttachments) return remoteAttachments;
     if (!state.enabled || event.source !== "interactive") return { action: "continue" };
 
     trackProcessing(state, scanCandidates(pi, state));
     await waitForProcessing(state, PROMPT_ATTACH_WAIT_MS);
-    const claimed = await runScreenshotter(pi, ["claim", "--target", TARGET, "--max", String(MAX_READY_SCREENSHOTS), "--fresh-ms", String(READY_TTL_MS), "--json"]);
+    const claimedArgs = ["claim", "--target", TARGET, "--max", String(MAX_READY_SCREENSHOTS), "--fresh-ms", String(READY_TTL_MS), "--json"];
+    if (state.withText) {
+      claimedArgs.push("--with-text", "--text-max-chars", String(DEFAULT_TEXT_MAX_CHARS));
+      if (state.noOcr) claimedArgs.push("--no-ocr");
+      else claimedArgs.push("--text-provider", "auto");
+    }
+    const claimed = await runScreenshotter(pi, claimedArgs);
     const screens = Array.isArray(claimed.screens) ? claimed.screens : [];
     if (screens.length === 0) {
       if (state.readyCount !== 0) await refreshReadyCount(pi, state);
@@ -90,7 +113,7 @@ export default function screenshotterExtension(pi) {
     notify(ctx, `${images.length} screenshot${images.length === 1 ? "" : "s"} attached`);
     return {
       action: "transform",
-      text: event.text,
+      text: state.withText ? appendScreenshotText(event.text, screens) : event.text,
       images: [...(event.images ?? []), ...images],
     };
   });
@@ -111,6 +134,25 @@ export default function screenshotterExtension(pi) {
           state.profile = command.toLowerCase();
           updateUi(ctx, state);
           notify(ctx, `screenshotter profile ${state.profile}`);
+          return;
+        case "text":
+        case "direct":
+          state.withText = true;
+          state.noOcr = true;
+          updateUi(ctx, state);
+          notify(ctx, "screenshotter direct text on");
+          return;
+        case "ocr":
+          state.withText = true;
+          state.noOcr = false;
+          updateUi(ctx, state);
+          notify(ctx, "screenshotter text with OCR fallback on");
+          return;
+        case "image":
+        case "no-text":
+          state.withText = false;
+          updateUi(ctx, state);
+          notify(ctx, "screenshotter text off");
           return;
         case "off":
           stopWatcher(state);
@@ -267,7 +309,13 @@ async function prepareCandidate(pi, state, candidatePath) {
     }
     if (!state.ctx?.isIdle()) return;
 
-    await runScreenshotter(pi, ["prepare", candidatePath, "--target", TARGET, "--profile", state.profile || DEFAULT_PROFILE, "--json"]);
+    const prepareArgs = ["prepare", candidatePath, "--target", TARGET, "--profile", state.profile || DEFAULT_PROFILE, "--json"];
+    if (state.withText) {
+      prepareArgs.push("--with-text", "--with-target-context", "--text-max-chars", String(DEFAULT_TEXT_MAX_CHARS));
+      if (state.noOcr) prepareArgs.push("--no-ocr");
+      else prepareArgs.push("--text-provider", "auto");
+    }
+    await runScreenshotter(pi, prepareArgs);
     state.fileSignatures.set(key, signature);
     await refreshReadyCount(pi, state);
     if (state.ctx) updateUi(state.ctx, state);
@@ -331,6 +379,7 @@ async function formatStatus(pi, state) {
   return [
     "on",
     `profile ${state.profile || DEFAULT_PROFILE}`,
+    state.withText ? state.noOcr ? "direct text on" : "text + OCR fallback" : undefined,
     state.watchMode ? `mode ${state.watchMode}` : undefined,
     state.watchDir ? `watching ${state.watchDir}` : undefined,
     `${status?.ready ?? state.readyCount} ready`,
@@ -416,6 +465,106 @@ function updateUi(ctx, state) {
   );
 }
 
+function appendScreenshotText(promptText, screens) {
+  const snippets = screens
+    .map((screen, index) => formatScreenshotTextBlock(screen, index))
+    .filter(Boolean);
+  if (snippets.length === 0) return promptText;
+
+  return [
+    promptText,
+    "",
+    ...snippets,
+  ].filter((part) => part !== undefined && part !== null).join("\n");
+}
+
+async function transformRemoteAttachmentInput(event, ctx) {
+  if (event.source !== "interactive") return undefined;
+  const text = String(event.text ?? "");
+  const matches = [...text.matchAll(REMOTE_BUNDLE_PATTERN)];
+  if (matches.length === 0) return undefined;
+  if (matches.length > MAX_REMOTE_BUNDLES) {
+    notify(ctx, `remote screenshot bundle limit is ${MAX_REMOTE_BUNDLES}`, "warning");
+    return undefined;
+  }
+
+  const contextBlocks = [];
+  const images = [];
+  try {
+    for (const match of matches) {
+      const bundle = JSON.parse(match[1]);
+      const contextPath = requireRemoteBundlePath(bundle.contextPath, "contextPath");
+      const imagePath = requireRemoteBundlePath(bundle.imagePath, "imagePath");
+      const context = await readRemoteBundleFile(contextPath, MAX_REMOTE_CONTEXT_BYTES, "context");
+      const image = await readRemoteBundleFile(imagePath, MAX_REMOTE_IMAGE_BYTES, "image");
+      const mimeType = REMOTE_IMAGE_MIME_TYPES.get(path.extname(imagePath).toLowerCase());
+      if (!mimeType || (bundle.mimeType && bundle.mimeType !== mimeType)) {
+        throw new Error("remote screenshot image type was invalid");
+      }
+      contextBlocks.push(context.toString("utf8").trim());
+      images.push({ type: "image", data: image.toString("base64"), mimeType });
+    }
+  } catch (error) {
+    notify(ctx, `could not attach remote screenshot: ${formatError(error)}`, "warning");
+    return undefined;
+  }
+
+  const promptText = matches
+    .reduce((value, match) => value.replace(match[0], ""), text)
+    .replace(REMOTE_BUNDLE_INTRO, "")
+    .trim();
+  notify(ctx, `${images.length} remote screenshot${images.length === 1 ? "" : "s"} attached`);
+  return {
+    action: "transform",
+    text: [promptText, ...contextBlocks].filter(Boolean).join("\n\n"),
+    images: [...(event.images ?? []), ...images],
+  };
+}
+
+function requireRemoteBundlePath(value, field) {
+  if (typeof value !== "string" || !path.isAbsolute(value) || /[\0\r\n]/.test(value)) {
+    throw new Error(`remote screenshot ${field} was invalid`);
+  }
+  return value;
+}
+
+async function readRemoteBundleFile(filePath, maxBytes, label) {
+  const configuredRoot = process.env.SCREENSHOTTER_REMOTE_INBOX_ROOT;
+  const inboxRoot = path.resolve(configuredRoot || path.join(os.homedir(), ".cache", "screenshotter", "inbox"));
+  const [realRoot, realFile] = await Promise.all([
+    fsp.realpath(inboxRoot),
+    fsp.realpath(filePath),
+  ]);
+  const relative = path.relative(realRoot, realFile);
+  if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) {
+    throw new Error(`remote screenshot ${label} was outside the private inbox`);
+  }
+
+  const fileStat = await fsp.stat(realFile);
+  if (!fileStat.isFile() || fileStat.size === 0 || fileStat.size > maxBytes) {
+    throw new Error(`remote screenshot ${label} exceeded its size limit or was unavailable`);
+  }
+  return fsp.readFile(realFile);
+}
+
+function formatScreenshotTextBlock(screen, index) {
+  const text = normalizeOcrText(screen.textContext?.text ?? screen.ocrText);
+  if (!text) return undefined;
+  const label = screen.textContext?.source
+    ? `Screenshot ${index + 1} text from ${screen.textContext.source}:`
+    : `Screenshot ${index + 1} text:`;
+  return [
+    label,
+    text,
+  ].join("\n");
+}
+
+function normalizeOcrText(text) {
+  return String(text ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
 function notify(ctx, message, type = "info") {
   if (ctx.hasUI) ctx.ui.notify(message, type);
 }
@@ -427,6 +576,9 @@ function usage() {
     "/screenshotter token   use the aggressive readable 2200px profile",
     "/screenshotter balanced use the mid 3000px profile",
     "/screenshotter readability use the light default profile",
+    "/screenshotter text    append direct screen text without OCR",
+    "/screenshotter ocr     append direct text with OCR fallback",
+    "/screenshotter image   stop appending screen text",
     "/screenshotter off     disable capture and clear ready screenshots",
     "/screenshotter status  show watcher state",
     "/screenshotter clear   clear ready screenshots",

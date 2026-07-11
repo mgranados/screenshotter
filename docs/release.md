@@ -15,8 +15,12 @@
 
    ```sh
    npm run check
+   npm run bench:text-sources
+   npm run eval:accessibility-provider -- --json
    npm run pack:dry-run
    ```
+
+   The Accessibility gate needs the local macOS grant. Use `-- --prompt-permissions` when setting up a new release machine. `npm run check` already includes Swift type-checking and the deterministic adversarial suite.
 
 ## GitHub
 

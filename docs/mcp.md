@@ -23,14 +23,16 @@ claude mcp add screenshotter -- node /path/to/screenshotter/bin/screenshotter-mc
 ## Tools
 
 - `screenshotter_status`: show ready counts, byte savings, and token estimates.
-- `screenshotter_prepare_latest`: optimize the latest native macOS screenshot.
-- `screenshotter_prepare`: optimize a specific local image path.
-- `screenshotter_claim`: atomically claim ready screenshots for the current target.
+- `screenshotter_prepare_latest`: optimize the latest native macOS screenshot, optionally with text and target context.
+- `screenshotter_prepare`: optimize a specific local image path, optionally with text and target context.
+- `screenshotter_claim`: atomically claim ready screenshots for the current target, optionally with text context.
 - `screenshotter_clear`: clear screenshots for a target.
 - `screenshotter_clip_latest`: optimize latest screenshot and copy it to the macOS clipboard.
 - `screenshotter_screenshot_dir`: show the native macOS screenshot folder.
 
-Prepare and claim tools return JSON text plus MCP image content when the optimized file is small enough to inline. They also return `optimizedPath` so clients that prefer file paths can attach or reference the image directly.
+Prepare and claim tools return JSON text plus MCP image content when the optimized file is small enough to inline. They also return `optimizedPath` so clients that prefer file paths can attach or reference the image directly. When `withText` is enabled, the JSON can include `textContext` and `textSources`. When `withTargetContext` is enabled on prepare-style tools, the JSON can include `screenTarget` with frontmost app and window-under-pointer metadata.
+
+Text and target fields are request-scoped: cached enrichment is not returned unless the current tool call opts in. Text uses Accessibility by default; set `textProvider: "auto"` for explicit OCR fallback or `ocr: true` to force Vision OCR. `textMaxChars` bounds extracted text before persistence and return. MCP child processes run asynchronously so a slow optimization or provider call does not block protocol pings and unrelated requests.
 
 ## Suggested Agent Prompt
 

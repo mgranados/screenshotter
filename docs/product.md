@@ -1,8 +1,10 @@
 # Product
 
-`screenshotter` is a local screenshot inbox for AI coding agents.
+`screenshotter` is a local screen-context inbox for AI coding agents.
 
-The product promise is simple: take a normal macOS screenshot, and the next agent prompt gets a readable, optimized image without drag-drop, manual compression, or uploading through a third-party service.
+The product promise is simple: take a normal macOS screenshot, and the next agent prompt gets compact screen context without drag-drop, manual compression, or uploading through a third-party service.
+
+Screen context includes a readable optimized image plus exact text when a browser, app, selection, or local OCR provider can supply it. See [screen-context.md](screen-context.md) for the text-aware feature spec.
 
 ## User
 
@@ -37,9 +39,11 @@ Adapters should stay thin and call the CLI instead of importing internals.
 
 - Local-first. Normal prepare/watch/claim/clipboard flows never upload screenshots.
 - Originals untouched. Optimized files are separate copies.
-- Readability profile by default: preserve normal Retina screenshot dimensions up to 4096 px long edge, JPEG quality 90, with a 1 MB byte target.
-- Sharp/libvips optimizer first, native ImageIO and `sips` fallbacks.
+- Readability profile by default: preserve normal Retina screenshot dimensions up to 4096 px long edge, JPEG quality 90.
+- Native ImageIO optimizer first, `sips` fallback, with Sharp/libvips available only as an explicit opt-in.
 - Verbose mode writes JSONL event logs for support and benchmarking.
+- Text-aware mode prefers direct DOM/source/accessibility text over OCR, while keeping OCR as a local fallback.
+- Target-aware mode is opt-in and records frontmost app/window-under-pointer metadata without changing image-only defaults.
 
 ## v0.1 Product Criteria
 
@@ -70,8 +74,9 @@ Do not build a GUI first. The product value is the invisible local workflow: scr
 2. Test Codex app watcher daily and tighten paste/log UX.
 3. Add Codex CLI MCP setup docs after hands-on testing.
 4. Add Claude Code MCP setup docs after hands-on testing.
-5. Publish `0.1.0` on npm.
-6. Add Homebrew formula after the npm release is stable.
+5. Add direct text providers for browser DOM and macOS Accessibility behind explicit flags.
+6. Publish `0.1.0` on npm.
+7. Add Homebrew formula after the npm release is stable.
 
 ## Not Now
 
@@ -79,4 +84,4 @@ Do not build a GUI first. The product value is the invisible local workflow: scr
 - Screenshot history UI.
 - Tauri app.
 - WebP in the default hot path.
-- OCR or multi-candidate optimization during normal screenshot preparation.
+- Multi-candidate optimization during normal screenshot preparation.

@@ -96,6 +96,14 @@ This command:
 
 Then paste it in Codex with `Cmd+V`.
 
+To paste screen text plus the optimized screenshot:
+
+```sh
+screenshotter codex-app --with-text --with-target-context --clipboard-mode attachments
+```
+
+This collects direct Accessibility text and copies a markdown context file plus the compressed image file to the clipboard. Paste once with `Cmd+V`. Add `--text-provider auto` only when you explicitly want Apple Vision OCR fallback. Use `--clipboard-mode codex-inline` only as a fallback when Codex refuses the context file attachment.
+
 For test runs, use verbose mode:
 
 ```sh
@@ -132,13 +140,14 @@ screenshotter clip --json
 screenshotter paste --json
 ```
 
-The JSON output includes the optimized file path. For `clip`, `paste`, and `codex-app`, the clipboard contains image data, not path text.
+The JSON output includes the optimized file path. For default `clip`, `paste`, and `codex-app`, the clipboard contains image data, not path text. `--clipboard-mode attachments` is the app/web attachment path: it places a markdown context file and the optimized image file on the clipboard.
 
 Copy prompt-ready Markdown or path text separately:
 
 ```sh
 screenshotter copy --format markdown --clipboard
 screenshotter copy --format paths --clipboard
+screenshotter copy --format text --clipboard
 ```
 
 Equivalent lower-level commands:
@@ -152,4 +161,4 @@ screenshotter reveal --target codex-app
 
 Codex CLI image attachment is available at process launch through `--image`. `screenshotter codex` cannot inject an image into an already-running Codex CLI session without terminal/UI automation. The MCP server gives an already-running session a pull-based tool path instead.
 
-The Codex desktop app does not currently expose a public local API for injecting an attachment into an already-open prompt. `screenshotter codex-app` gets the optimized image ready, but the final paste action still happens through the app UI.
+The Codex desktop app does not currently expose a public local API for injecting an attachment into an already-open prompt. `screenshotter codex-app` gets the optimized image ready for user paste by default; `--clipboard-mode attachments` prepares both the context file and optimized image for one user paste.

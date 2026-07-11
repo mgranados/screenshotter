@@ -2,13 +2,13 @@
 
 The default policy is the readability profile:
 
-- `readability`: Low/default, JPEG quality 90/88/85, max long edge 4096 px, 1 MB byte target.
+- `readability`: Low/default, JPEG quality 90, max long edge 4096 px. Sharp opt-in mode adds a q90/q88/q85 ladder with a 1 MB byte target.
 - `balanced`: Mid, JPEG quality 85, max long edge 3000 px.
 - `token`: High, JPEG quality 50 when resizing, JPEG quality 75 when no resize is needed, max long edge 2200 px.
 
-All profiles use Sharp/libvips by default, with native macOS ImageIO and `sips` fallbacks. The default JPEG path uses 4:4:4 chroma for UI text, Sharp quantisation table 3, strips metadata, keeps the original file when JPEG would be larger, and avoids WebP, AVIF, OCR, or slow MozJPEG during normal preparation.
+All profiles use native macOS ImageIO by default, with `sips` as the always-available fallback. Sharp/libvips remains available as an opt-in optimizer when installed separately and selected with `--optimizer sharp` or `SCREENSHOTTER_OPTIMIZER=sharp`. Normal preparation strips metadata, keeps the original file when JPEG would be larger, and avoids WebP, AVIF, OCR, or slow MozJPEG.
 
-The readability profile tries q90 first, then q88/q85 only when needed to stay under the byte target. This keeps quality high for most screenshots while avoiding oversized full-desktop attachments.
+The readability profile keeps quality high for text-heavy screenshots. If Sharp is explicitly enabled, it tries q90 first, then q88/q85 only when needed to stay under the byte target.
 
 ## Local Benchmark
 
@@ -17,6 +17,7 @@ Command:
 ```sh
 screenshotter bench --latest 20 --json
 screenshotter bench --latest 20 --profile balanced --json
+screenshotter bench --latest 20 --profile balanced --optimizer sharp --json
 screenshotter bench --latest 20 --profile balanced --optimizer sips --json
 screenshotter bench --latest 20 --tokens --json
 ```
@@ -48,13 +49,29 @@ Control runs on the latest 5-screenshot sample:
 | native ImageIO, readability full size, q88 | 88.1 ms | 83.6 ms | 5.77 MB | 63.3% | 0.0% |
 | native ImageIO, readability full size, q90 | 91.3 ms | 71.1 ms | 5.83 MB | 62.9% | 0.0% |
 
-The default now prioritizes reading tiny UI text and keeping files near 1 MB over image-token savings. Use `--profile token` when dimension savings matter more than full-resolution fidelity, and use `--optimizer native` or `--optimizer sips` for comparison.
+The default now prioritizes reading tiny UI text and avoiding mandatory third-party native libraries over byte-minimal output. Use `--profile token` when dimension savings matter more than full-resolution fidelity, and use `--optimizer sharp` when you want the libvips byte ladder and have installed Sharp yourself.
 
-Menu labels use rounded latest-20 Sharp/libvips savings estimates:
+## Capture Pipeline Latency
+
+Toolbar capture overlaps independent work without changing image quality or text-provider order:
+
+- screenshot file stabilization runs with target-window detection;
+- native compression runs with direct DOM or Accessibility extraction;
+- OCR remains a fallback and starts only when direct extraction is empty.
+
+Run the deterministic regression gate with:
+
+```sh
+node scripts/performance-smoke-test.mjs
+```
+
+The gate uses the real preparation pipeline with delayed helper processes and fails below a 20% improvement over the equivalent serial stages. The current local run measured 36.3%. Verbose toolbar events record individual and overlapping stage durations under `timings` in `events.jsonl` for live performance checks.
+
+Menu labels use rounded latest-20 savings estimates:
 
 | Menu label | CLI profile | Setting | Estimate |
 | --- | --- | --- | ---: |
-| Low Compression (avg ~30%) | `readability` | 4096 px, q90/q88/q85 with 1 MB target | ~30% |
+| Low Compression (avg ~30%) | `readability` | 4096 px, q90 | ~30% |
 | Mid Compression (avg ~45%) | `balanced` | 3000 px, q85 | ~45% |
 | High Compression (avg ~80%) | `token` | 2200 px, q50 when resizing, q75 otherwise | ~80% |
 
@@ -160,6 +177,28 @@ Current local retina-only Apple Vision run:
 | 1400 px | 87.0% | 93.0% | 91.4% | 85.3% | Fails p10 |
 
 Practical high-compression profile: `token` uses 2200 px because it is the current smallest candidate from Apple Vision that cleared the p10 text-retention gate in this sweep. A 10-screenshot sweep made 1600 px look viable, but the larger 20-screenshot run dropped below the 90% p10 gate. Keep 2200 px available for text-heavy debugging until a cheap model-backed Codex eval passes the same screenshot corpus at a smaller size.
+
+## Text Source Benchmark
+
+Direct text can beat screenshot OCR when an adapter can access the source. Browser DOM text, app accessibility text, or explicit selection-copy text can preserve exact words while the screenshot still carries layout and visual state.
+
+Run:
+
+```sh
+npm run bench:text-sources
+npm run eval:accessibility-provider -- --json
+npm run eval:context-adversarial
+```
+
+`bench:text-sources` generates ground-truth UI fixtures, verifies the fixture/scoring baseline, renders PNGs with a native Swift renderer, and compares Apple Vision OCR against the same ground truth. It reports token recall, precision, F1, character similarity, and latency. Requested OCR is a hard gate: unavailable Vision or zero successful rows fails instead of silently passing.
+
+The generated-source baseline is not a live DOM result. Live Accessibility quality is measured separately by launching a controlled native fixture app and invoking the exact shipped `macos-accessibility-text.swift` helper against its PID. Its default gates are token F1 `>= 0.95` and end-to-end latency `<= 250 ms`, including process startup; missing permission and provider failure are non-passing results.
+
+Use `-- --prompt-permissions` with the Accessibility evaluation when the terminal has not yet been granted macOS Accessibility access. Use `-- --skip-vision` only to validate fixture rendering and scoring without making an OCR quality claim.
+
+Recommendation: use direct DOM/accessibility/selection text when available, attach the compressed screenshot for visual context, and keep screenshot OCR as the universal fallback for canvas, image-only UIs, remote desktops, and apps that do not expose accessible text.
+
+Inside restricted sandboxes, Apple Vision or Accessibility may fail even though the same helper works from a normal macOS terminal. Those runs now report an unavailable provider and exit nonzero rather than recording a quality score.
 
 ## Pokémon Sheet Stress Test
 

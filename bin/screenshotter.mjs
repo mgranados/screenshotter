@@ -2,7 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
-import { appendFile, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 const VERSION = "0.0.1";
 const SCHEMA_VERSION = 1;
+const STATS_SCHEMA_VERSION = 1;
 const BALANCED_MAX_LONG_EDGE_PX = 3000;
 const BALANCED_JPEG_QUALITY = 85;
 const TOKEN_MAX_LONG_EDGE_PX = 2200;
@@ -19,27 +20,60 @@ const RETINA_DPI_THRESHOLD = 120;
 const RETINA_DOWNSCALE_FACTOR = 0.5;
 const MIN_RETINA_DOWNSCALE_LONG_EDGE_PX = 3000;
 const SMALL_DIRECT_SEND_BYTES = 256 * 1024;
-const FILE_STABLE_INTERVAL_MS = 150;
+const FILE_STABLE_INTERVAL_MS = 100;
+const FILE_STABLE_SETTLED_MS = 150;
 const FILE_STABLE_TIMEOUT_MS = 5000;
 const DEFAULT_FRESH_MS = 10 * 60_000;
 const DEFAULT_CLAIM_MAX = 4;
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_STALE_MS = 30_000;
+const ARTIFACT_LOCK_TIMEOUT_MS = 90_000;
+const LOCK_HEARTBEAT_MS = 5000;
+const DEFAULT_READY_RETENTION_MS = 24 * 60 * 60_000;
+const DEFAULT_RECORD_RETENTION_MS = 30 * 24 * 60 * 60_000;
+const DEFAULT_MAX_SCREEN_RECORDS = 500;
 const ROOT_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const NATIVE_OPTIMIZER_SOURCE = join(ROOT_DIR, "scripts", "native-image-optimizer.swift");
 const MENU_BAR_CONTROLLER_SOURCE = join(ROOT_DIR, "scripts", "menu-bar-controller.swift");
+const APPLE_VISION_OCR_SOURCE = join(ROOT_DIR, "scripts", "apple-vision-ocr.swift");
+const SCREEN_TARGET_SNAPSHOT_SOURCE = join(ROOT_DIR, "scripts", "screen-target-snapshot.swift");
+const MACOS_ACCESSIBILITY_TEXT_SOURCE = join(ROOT_DIR, "scripts", "macos-accessibility-text.swift");
 const DEFAULT_PROFILE = "readability";
-const DEFAULT_OPTIMIZER = "sharp";
+const DEFAULT_OPTIMIZER = "native";
+const DEFAULT_OCR_LEVEL = "accurate";
+const DEFAULT_OCR_LANGUAGES = ["en-US"];
+const DEFAULT_TEXT_PROVIDER = "accessibility";
+const DEFAULT_TEXT_SNIPPET_MAX_CHARS = 4000;
+const CODEX_APP_PASTE_DELAY_MS = 800;
+const REMOTE_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024;
+const REMOTE_ATTACHMENT_DIR_COMMAND = 'umask 077; dir="${XDG_CACHE_HOME:-$HOME/.cache}/screenshotter/inbox"; mkdir -p "$dir"; find "$dir" -type f -mtime +1 -delete 2>/dev/null || true; printf "%s" "$dir"';
 const READABILITY_MAX_OUTPUT_BYTES = 1_000_000;
 const SHARP_JPEG_MIN_QUALITY = 85;
 const SHARP_JPEG_CHROMA_SUBSAMPLING = "4:4:4";
 const SHARP_JPEG_QUANTISATION_TABLE = 3;
+const PROCESS_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
 
 const SCREENSHOT_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".heic", ".tif", ".tiff"]);
 const DIRECT_SEND_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 const JPEG_DERIVATIVE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".heic", ".tif", ".tiff"]);
-const WRAPPER_BOOLEAN_FLAGS = new Set(["--dry-run", "--json", "--verbose", "--log", "--no-log", "--no-clipboard"]);
+const IMAGE_PASTEBOARD_TYPES_BY_MIME = new Map([
+  ["image/jpeg", "public.jpeg"],
+  ["image/png", "public.png"],
+  ["image/gif", "com.compuserve.gif"],
+  ["image/tiff", "public.tiff"],
+  ["image/webp", "org.webmproject.webp"],
+]);
+const IMAGE_PASTEBOARD_TYPES_BY_EXTENSION = new Map([
+  [".jpg", "public.jpeg"],
+  [".jpeg", "public.jpeg"],
+  [".png", "public.png"],
+  [".gif", "com.compuserve.gif"],
+  [".tif", "public.tiff"],
+  [".tiff", "public.tiff"],
+  [".webp", "org.webmproject.webp"],
+]);
+const WRAPPER_BOOLEAN_FLAGS = new Set(["--dry-run", "--json", "--verbose", "--log", "--no-log", "--no-clipboard", "--ocr", "--text", "--with-text", "--no-text", "--with-target-context", "--target-context", "--no-ocr", "--require-ocr", "--no-language-correction", "--prompt-permissions"]);
 const WRAPPER_VALUE_FLAGS = new Set([
   "--target",
   "--max",
@@ -54,7 +88,36 @@ const WRAPPER_VALUE_FLAGS = new Set([
   "--jpeg-quality",
   "--max-output-bytes",
   "--max-patches",
+  "--clipboard-mode",
+  "--remote-target",
+  "--ocr-level",
+  "--ocr-languages",
+  "--text-provider",
+  "--text-max-chars",
 ]);
+const API_OPTION_ALIASES = [
+  ["dataDir", "data-dir"],
+  ["optimizedDir", "optimized-dir"],
+  ["maxLongEdge", "max-long-edge"],
+  ["longEdgePercent", "long-edge-percent"],
+  ["minLongEdge", "min-long-edge"],
+  ["jpegQuality", "jpeg-quality"],
+  ["maxOutputBytes", "max-output-bytes"],
+  ["maxPatches", "max-patches"],
+  ["clipboardMode", "clipboard-mode"],
+  ["remoteTarget", "remote-target"],
+  ["textProvider", "text-provider"],
+  ["textMaxChars", "text-max-chars"],
+  ["ocrLevel", "ocr-level"],
+  ["ocrLanguages", "ocr-languages"],
+  ["dryRun", "dry-run"],
+  ["withText", "with-text"],
+  ["noText", "no-text"],
+  ["noOcr", "no-ocr"],
+  ["withTargetContext", "with-target-context"],
+  ["noLanguageCorrection", "no-language-correction"],
+  ["requireOcr", "require-ocr"],
+];
 const OPTIMIZATION_PROFILES = {
   balanced: {
     profile: "balanced",
@@ -85,12 +148,73 @@ const OPTIMIZATION_PROFILES = {
 };
 const nativeOptimizerBinaries = new Map();
 const menuBarControllerBinaries = new Map();
+const appleVisionOcrBinaries = new Map();
+const screenTargetSnapshotBinaries = new Map();
+const macosAccessibilityTextBinaries = new Map();
+const remoteAttachmentDirs = new Map();
 let sharpModulePromise;
+const maintainedStores = new Set();
 
-main().catch((error) => {
-  console.error(formatError(error));
-  process.exitCode = 1;
-});
+if (isCliEntryPoint()) {
+  main().catch((error) => {
+    console.error(formatError(error));
+    process.exitCode = 1;
+  });
+}
+
+export async function prepareImage(input, options = {}) {
+  const args = apiArgs(options);
+  return publicResult((await preparePath(args, input)).result, projectionOptions(args));
+}
+
+export async function prepareLatestScreen(options = {}) {
+  const args = apiArgs(options);
+  return publicResult(await prepareLatest(args), projectionOptions(args));
+}
+
+export async function copyPreparedScreen(screen, options = {}) {
+  const args = apiArgs(options);
+  if (args["dry-run"]) {
+    const mode = clipboardDeliveryMode(args);
+    return {
+      status: `${mode}-dry-run`,
+      label: "clipboard dry-run",
+      textCopied: mode !== "image" && Boolean(formatScreenTextSnippet(screen, args)),
+    };
+  }
+  return copyScreenToClipboard(screen, args);
+}
+
+export async function prepareLatestForClipboard(options = {}) {
+  const args = apiArgs(options);
+  const result = await prepareLatest(args);
+  const clipboard = await copyPreparedScreen(result.screen, args);
+  return publicResult({ ...result, clipboard }, projectionOptions(args));
+}
+
+function isCliEntryPoint() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    return fs.realpathSync(entry) === fs.realpathSync(modulePath);
+  } catch {
+    return resolve(entry) === modulePath;
+  }
+}
+
+function apiArgs(options = {}) {
+  const args = { ...options, _: Array.isArray(options._) ? options._ : [] };
+  for (const [camelKey, cliKey] of API_OPTION_ALIASES) applyApiAlias(args, options, camelKey, cliKey);
+  if (options.targetContext !== undefined && args["with-target-context"] === undefined) args["with-target-context"] = options.targetContext;
+  return args;
+}
+
+function applyApiAlias(args, options, camelKey, cliKey) {
+  if (options[camelKey] !== undefined && args[cliKey] === undefined) {
+    args[cliKey] = options[camelKey];
+  }
+}
 
 async function main() {
   const [command, ...argv] = process.argv.slice(2);
@@ -126,6 +250,10 @@ async function main() {
       return clearCommand(args);
     case "status":
       return statusCommand(args);
+    case "stats":
+      return statsCommand(args);
+    case "gc":
+      return gcCommand(args);
     case "copy":
       return copyCommand(args);
     case "reveal":
@@ -183,13 +311,27 @@ async function prepareLatestWithStore(args) {
 
 async function preparePath(args, input) {
   const sourcePath = resolve(expandHome(input));
-  const sourceStat = await waitForStableFile(sourcePath);
-  if (!sourceStat) throw new Error(`File did not become stable: ${sourcePath}`);
   if (!isSupportedScreenshotPath(sourcePath)) throw new Error(`Unsupported screenshot type: ${sourcePath}`);
 
   const store = storePaths(args);
   await ensureStore(store);
-  const result = await prepareOne(store, sourcePath, sourceStat, args.target ?? null, optimizationOptions(args));
+  const targetOptions = screenTargetOptions(args);
+  const targetSnapshotPromise = targetOptions.enabled
+    ? collectScreenTargetSnapshot(store)
+    : Promise.resolve(null);
+  const sourceStat = await waitForStableFile(sourcePath);
+  if (!sourceStat) throw new Error(`File did not become stable: ${sourcePath}`);
+  const targetSnapshot = await targetSnapshotPromise;
+  const result = await prepareOne(store, sourcePath, sourceStat, args.target ?? null, optimizationOptions(args), {
+    text: {
+      ...textContextOptions(args),
+      forceRefresh: Boolean(targetSnapshot),
+    },
+    screenTarget: {
+      ...targetOptions,
+      snapshot: targetSnapshot,
+    },
+  });
   return { store, result };
 }
 
@@ -203,6 +345,8 @@ async function watchCommand(args) {
     enabled: true,
     profile: args.profile ?? DEFAULT_PROFILE,
     options: optimizationOptions(args),
+    textOptions: textContextOptions(args),
+    screenTargetOptions: screenTargetOptions(args),
     ready: 0,
     history: [],
   };
@@ -213,6 +357,9 @@ async function watchCommand(args) {
   const store = storePaths(args);
   await ensureStore(store);
   await prewarmOptimizer(watchState.options);
+  await prewarmWatchResources(store, watchState, watchArgs).catch((error) => {
+    if (shouldVerbose(watchArgs)) process.stderr.write(`[screenshotter] prewarm failed: ${formatError(error)}\n`);
+  });
   let sinceMs = Date.now();
   const pollIntervalMs = parsePositiveInteger(args["poll-ms"], DEFAULT_POLL_INTERVAL_MS);
   const processingPaths = new Set();
@@ -224,6 +371,7 @@ async function watchCommand(args) {
   let pollTimer;
   let controlTimer;
   let stopWatch;
+  let menuAnimationSequence = 0;
 
   writeText(`screenshotter ${toolbarMode ? "toolbar" : "watch"}\n`);
   writeText(`watching: ${watchDir}\n`);
@@ -232,20 +380,24 @@ async function watchCommand(args) {
   writeText(`profile: ${formatProfileSummary(watchState.options, { concise: true, includeProfileId: false })}\n`);
   writeText(`clipboard: ${formatWatchDelivery(watchArgs)}\n`);
 
-  const countReady = async () => {
-    const db = await readDb(store);
-    return filterScreens(db.screens, { target, state: "ready" }).length;
-  };
-
   const pushControlState = async () => {
     if (!menuBar) return;
-    watchState.ready = await countReady().catch(() => 0);
+    const [db, stats] = await Promise.all([
+      readDb(store).catch(() => emptyDb()),
+      readStats(store).catch(() => emptyStats()),
+    ]);
+    const recentHistory = recentCompressionHistory(db.screens);
+    watchState.ready = filterScreens(db.screens, { target, state: "ready" }).length;
     menuBar.sendState({
       enabled: watchState.enabled,
       profile: watchState.profile,
       ready: watchState.ready,
       target,
-      history: watchState.history,
+      history: recentHistory,
+      stats: {
+        screensPrepared: stats.screensPrepared,
+        savedBytes: stats.savedBytes,
+      },
     });
   };
 
@@ -317,9 +469,39 @@ async function watchCommand(args) {
     const key = resolve(candidatePath);
     if (processingPaths.has(key)) return;
     processingPaths.add(key);
+    const animationId = `capture-${++menuAnimationSequence}`;
+    let animationStarted = false;
+    let animationResolved = false;
 
     try {
-      const fileStat = await waitForStableFile(candidatePath);
+      const started = performance.now();
+      const initialStat = await safeStat(candidatePath);
+      if (initialStat?.isFile()) {
+        const initialSignature = fileSignature(initialStat);
+        if (fileSignatures.get(key) === initialSignature) return;
+        if (Math.max(initialStat.birthtimeMs, initialStat.ctimeMs, initialStat.mtimeMs) < sinceMs - 1000) {
+          fileSignatures.set(key, initialSignature);
+          return;
+        }
+      }
+      if (menuBar) {
+        menuBar.sendEvent({ type: "processing", id: animationId });
+        animationStarted = true;
+      }
+      const captureInputs = await measureAsync(async () => {
+        const targetSnapshotPromise = watchState.screenTargetOptions.enabled
+          ? measureAsync(() => collectScreenTargetSnapshot(store))
+          : Promise.resolve({ value: null, durationMs: 0 });
+        const fileStatPromise = measureAsync(() => waitForStableFile(candidatePath));
+        const [targeted, stabilized] = await Promise.all([targetSnapshotPromise, fileStatPromise]);
+        return {
+          targetSnapshot: targeted.value,
+          fileStat: stabilized.value,
+          targetSnapshotMs: targeted.durationMs,
+          fileStableMs: stabilized.durationMs,
+        };
+      });
+      const { targetSnapshot, fileStat } = captureInputs.value;
       if (!fileStat) return;
       const signature = fileSignature(fileStat);
       if (fileSignatures.get(key) === signature) return;
@@ -327,17 +509,27 @@ async function watchCommand(args) {
         fileSignatures.set(key, signature);
         return;
       }
-      const started = performance.now();
-      const result = await prepareOne(store, key, fileStat, target, watchState.options);
+      const prepared = await measureAsync(() => prepareOne(store, key, fileStat, target, watchState.options, {
+        text: {
+          ...watchState.textOptions,
+          forceRefresh: Boolean(targetSnapshot),
+        },
+        screenTarget: {
+          ...watchState.screenTargetOptions,
+          snapshot: targetSnapshot,
+        },
+      }));
+      const result = prepared.value;
       const screen = result.screen;
-      const clipboard = await maybeCopyWatchImage(watchArgs, screen);
+      const copied = await measureAsync(() => maybeCopyWatchClipboard(watchArgs, screen));
+      const clipboard = copied.value;
       const durationMs = round(performance.now() - started, 1);
-      if (result.prepared && menuBar) {
-        watchState.history = [
-          compressionHistoryEntry(screen),
-          ...watchState.history,
-        ].slice(0, 3);
-      }
+      const concurrency = estimateConcurrencyPerformance(durationMs, {
+        captureInputsMs: captureInputs.durationMs,
+        targetSnapshotMs: captureInputs.value.targetSnapshotMs,
+        fileStableMs: captureInputs.value.fileStableMs,
+        prepare: result.timings,
+      });
       fileSignatures.set(key, signature);
       await reportScreenEvent(watchArgs, store, "watch.prepare", screen, {
         prepared: result.prepared,
@@ -345,12 +537,47 @@ async function watchCommand(args) {
         clipboard: clipboard.status,
         clipboardError: clipboard.error,
         targetSource: watchTarget.source,
+        timings: {
+          captureInputsMs: captureInputs.durationMs,
+          targetSnapshotMs: captureInputs.value.targetSnapshotMs,
+          fileStableMs: captureInputs.value.fileStableMs,
+          prepareMs: prepared.durationMs,
+          clipboardMs: copied.durationMs,
+          totalMs: durationMs,
+          prepare: result.timings ?? null,
+          concurrency,
+        },
       });
       writeText(formatWatchPrepareLine(result, screen, durationMs, clipboard.label, watchArgs));
       await pushControlState();
+      if (menuBar && animationStarted) {
+        const clipboardReady = clipboard.status
+          && clipboard.status !== "failed"
+          && !clipboard.status.endsWith("-dry-run");
+        menuBar.sendEvent(clipboardReady
+          ? {
+              type: "ready",
+              id: animationId,
+              clipboard: clipboard.status,
+              hasImage: Boolean(screen.optimizedPath),
+              hasText: Boolean(screen.textContext?.text),
+            }
+          : {
+              type: clipboard.status === "failed" ? "failed" : "idle",
+              id: animationId,
+            });
+        animationResolved = true;
+      }
     } catch (error) {
+      if (menuBar && animationStarted && !animationResolved) {
+        menuBar.sendEvent({ type: "failed", id: animationId });
+        animationResolved = true;
+      }
       console.error(`failed to prepare ${candidatePath}: ${formatError(error)}`);
     } finally {
+      if (menuBar && animationStarted && !animationResolved) {
+        menuBar.sendEvent({ type: "idle", id: animationId });
+      }
       processingPaths.delete(key);
     }
   };
@@ -400,74 +627,235 @@ async function watchCommand(args) {
   });
 }
 
-async function maybeCopyWatchImage(args, screen) {
+async function maybeCopyWatchClipboard(args, screen) {
   if (!args.clipboard) return { status: null, label: "" };
-  if (args["dry-run"]) return { status: "image-dry-run", label: "clipboard dry-run" };
+  const mode = clipboardDeliveryMode(args);
+  if (args["dry-run"]) return { status: `${mode}-dry-run`, label: "clipboard dry-run" };
   try {
-    await copyImageToClipboard(screen.optimizedPath);
-    return { status: "image", label: "copied" };
+    const copied = await copyScreenToClipboard(screen, args);
+    return { status: copied.status, label: copied.label };
   } catch (error) {
     return { status: "failed", label: "clipboard failed", error: formatError(error) };
   }
 }
 
-async function prepareOne(store, sourcePath, sourceStat, target, rawOptions = {}) {
+async function prepareOne(store, sourcePath, sourceStat, target, rawOptions = {}, rawContextOptions = {}) {
+  const totalStarted = performance.now();
   const options = normalizeOptimizationOptions(rawOptions);
-  const source = await inspectSourceFile(sourcePath);
+  const contextOptions = normalizePrepareContextOptions(rawContextOptions);
+  const textOptions = contextOptions.text;
+  const screenTargetOptions = contextOptions.screenTarget;
+  const inspected = await measureAsync(() => inspectSourceFile(sourcePath));
+  const source = inspected.value;
   const hash = source.hash;
   const now = new Date().toISOString();
   const optimizeKey = optimizationKey(options);
+  const lookup = { hash, target, optimizeKey, sourcePath, contextOptions };
 
-  return withStoreLock(store, async () => {
+  const reused = await measureAsync(() => withStoreLock(store, async () => {
     const db = await readDb(store);
-    const existing = db.screens.find((screen) => (
-      screen.hash === hash
-      && screenState(screen) === "ready"
-      && (!screen.target || screen.target === target)
-      && screen.optimizeKey === optimizeKey
-    ));
-    if (existing) {
-      if (target && !existing.target) {
-        existing.target = target;
-        await writeDb(store, db);
+    return findReusableScreen(db.screens, lookup) ?? null;
+  }));
+  const existing = reused.value;
+
+  if (existing) {
+    const enriched = { ...existing };
+    let changed = false;
+    const enrichment = await measureAsync(async () => {
+      if (target && !enriched.target) {
+        enriched.target = target;
+        changed = true;
       }
-      return { screen: existing, prepared: false };
+      if (screenTargetOptions.enabled && shouldRefreshScreenTarget(enriched, screenTargetOptions)) {
+        await applyScreenTargetToScreen(store, enriched, screenTargetOptions);
+        changed = true;
+      }
+      if (textOptions.enabled && shouldRefreshTextContext(enriched, textOptions)) {
+        await applyTextContextToScreen(store, enriched, textOptions);
+        changed = true;
+      }
+    });
+    if (!changed) {
+      return {
+        screen: enriched,
+        prepared: false,
+        timings: {
+          inspectMs: inspected.durationMs,
+          lookupMs: reused.durationMs,
+          enrichmentMs: enrichment.durationMs,
+          totalMs: round(performance.now() - totalStarted, 1),
+        },
+      };
     }
 
-    const optimized = await optimizeForPrompt(store, sourcePath, hash, sourceStat, source.metadata, options);
-    const screen = {
-      id: `scr_${hash.slice(0, 12)}_${Date.now().toString(36)}`,
-      hash,
-      sourcePath,
-      optimizedPath: optimized.path,
-      mimeType: optimized.mimeType,
-      createdAt: new Date(Math.max(sourceStat.birthtimeMs, sourceStat.ctimeMs, sourceStat.mtimeMs)).toISOString(),
-      preparedAt: now,
-      claimedAt: null,
-      clearedAt: null,
-      status: "ready",
-      target,
-      originalBytes: sourceStat.size,
-      optimizedBytes: optimized.bytes,
-      width: optimized.width,
-      height: optimized.height,
-      originalWidth: optimized.originalWidth,
-      originalHeight: optimized.originalHeight,
-      optimized: optimized.optimized,
-      profile: options.profile,
-      optimizeKey,
-      maxLongEdge: options.maxLongEdge,
-      longEdgePercent: options.longEdgePercent ?? null,
-      minLongEdge: options.minLongEdge ?? null,
-      maxPatches: options.maxPatches ?? null,
-      jpegQuality: optimized.jpegQuality ?? options.jpegQuality,
-      maxOutputBytes: options.maxOutputBytes ?? null,
-      optimizer: optimized.optimizer ?? "unknown",
+    const persisted = await measureAsync(() => withStoreLock(store, async () => {
+      const db = await readDb(store);
+      const current = db.screens.find((screen) => screen.id === enriched.id);
+      if (!current) return enriched;
+      mergeScreenEnrichment(current, enriched, contextOptions);
+      if (target && !current.target) current.target = target;
+      await writeDb(store, db);
+      return current;
+    }));
+    return {
+      screen: persisted.value,
+      prepared: false,
+      timings: {
+        inspectMs: inspected.durationMs,
+        lookupMs: reused.durationMs,
+        enrichmentMs: enrichment.durationMs,
+        persistMs: persisted.durationMs,
+        totalMs: round(performance.now() - totalStarted, 1),
+      },
     };
+  }
+
+  const contextScreen = { sourcePath };
+  const textPlan = textPreparationPlan(textOptions);
+  const parallelStarted = performance.now();
+  const [optimization, context] = await Promise.all([
+    measureAsync(() => withArtifactLock(store, `${hash}:${optimizeKey}`, () => (
+      optimizeForPrompt(store, sourcePath, hash, sourceStat, source.metadata, options)
+    ))),
+    collectPreparationContext(store, contextScreen, screenTargetOptions, textOptions, textPlan.parallelProviders),
+  ]);
+  const parallelStageMs = round(performance.now() - parallelStarted, 1);
+  const optimized = optimization.value;
+  let textResult = context.textResult ?? { textContext: null, sources: [] };
+  let textMs = context.textMs;
+  let fallbackTextMs = 0;
+  if (textOptions.enabled && !textResult?.textContext && textPlan.remainingProviders.length > 0) {
+    const collected = await measureAsync(() => collectTextContextProviders(
+      store,
+      contextScreen,
+      textOptions,
+      textPlan.remainingProviders,
+      textResult?.sources,
+    ));
+    textResult = collected.value;
+    fallbackTextMs = collected.durationMs;
+    textMs = round(textMs + fallbackTextMs, 1);
+  }
+
+  const screen = {
+    id: `scr_${hash.slice(0, 12)}_${Date.now().toString(36)}`,
+    hash,
+    sourcePath,
+    optimizedPath: optimized.path,
+    mimeType: optimized.mimeType,
+    createdAt: new Date(Math.max(sourceStat.birthtimeMs, sourceStat.ctimeMs, sourceStat.mtimeMs)).toISOString(),
+    preparedAt: now,
+    claimedAt: null,
+    clearedAt: null,
+    status: "ready",
+    target,
+    originalBytes: sourceStat.size,
+    optimizedBytes: optimized.bytes,
+    width: optimized.width,
+    height: optimized.height,
+    originalWidth: optimized.originalWidth,
+    originalHeight: optimized.originalHeight,
+    optimized: optimized.optimized,
+    profile: options.profile,
+    optimizeKey,
+    maxLongEdge: options.maxLongEdge,
+    longEdgePercent: options.longEdgePercent ?? null,
+    minLongEdge: options.minLongEdge ?? null,
+    maxPatches: options.maxPatches ?? null,
+    jpegQuality: optimized.jpegQuality ?? options.jpegQuality,
+    maxOutputBytes: options.maxOutputBytes ?? null,
+    optimizer: optimized.optimizer ?? "unknown",
+  };
+  if (screenTargetOptions.enabled) {
+    screen.screenTarget = contextScreen.screenTarget ?? null;
+    screen.screenTargetKey = contextScreen.screenTargetKey;
+  }
+  if (textOptions.enabled) applyTextContextResultToScreen(screen, textResult, textOptions);
+
+  const persisted = await measureAsync(() => withStoreLock(store, async () => {
+    const db = await readDb(store);
+    const raced = findReusableScreen(db.screens, lookup);
+    if (raced) {
+      mergeScreenEnrichment(raced, screen, contextOptions);
+      await writeDb(store, db);
+      return { screen: raced, prepared: false };
+    }
+
     db.screens.push(screen);
     await writeDb(store, db);
+    await recordPreparedScreenStats(store, screen);
     return { screen, prepared: true };
-  });
+  }));
+  return {
+    ...persisted.value,
+    timings: {
+      inspectMs: inspected.durationMs,
+      lookupMs: reused.durationMs,
+      optimizeMs: optimization.durationMs,
+      targetMs: context.targetMs,
+      textMs,
+      parallelTextMs: context.textMs,
+      fallbackTextMs,
+      parallelStageMs,
+      persistMs: persisted.durationMs,
+      totalMs: round(performance.now() - totalStarted, 1),
+    },
+  };
+}
+
+function textPreparationPlan(options) {
+  if (!options.enabled) return { parallelProviders: [], remainingProviders: [] };
+  const providers = textProviderSequence(options);
+  const ocrIndex = providers.indexOf("ocr");
+  if (ocrIndex < 0) return { parallelProviders: providers, remainingProviders: [] };
+  return {
+    parallelProviders: providers.slice(0, ocrIndex),
+    remainingProviders: providers.slice(ocrIndex),
+  };
+}
+
+async function collectPreparationContext(store, screen, targetOptions, textOptions, textProviders) {
+  let targetMs = 0;
+  let textMs = 0;
+  let textResult = null;
+
+  if (targetOptions.enabled) {
+    const targeted = await measureAsync(() => applyScreenTargetToScreen(store, screen, targetOptions));
+    targetMs = targeted.durationMs;
+  }
+  if (textProviders.length > 0) {
+    const collected = await measureAsync(() => collectTextContextProviders(store, screen, textOptions, textProviders));
+    textResult = collected.value;
+    textMs = collected.durationMs;
+  }
+
+  return { targetMs, textMs, textResult };
+}
+
+function findReusableScreen(screens, { hash, target, optimizeKey, sourcePath, contextOptions }) {
+  const requiresCaptureIdentity = contextOptions.text.enabled || contextOptions.screenTarget.enabled;
+  return screens.find((screen) => (
+    screen.hash === hash
+    && screenState(screen) === "ready"
+    && (!screen.target || screen.target === target)
+    && screen.optimizeKey === optimizeKey
+    && (!requiresCaptureIdentity || screen.sourcePath === sourcePath)
+  ));
+}
+
+function mergeScreenEnrichment(target, source, contextOptions) {
+  if (contextOptions.screenTarget.enabled) {
+    target.screenTarget = source.screenTarget ?? null;
+    target.screenTargetKey = source.screenTargetKey;
+  }
+  if (contextOptions.text.enabled) {
+    target.textContext = source.textContext ?? null;
+    target.textSources = source.textSources ?? [];
+    target.textContextKey = source.textContextKey;
+    target.ocrText = source.ocrText ?? null;
+    target.ocrTextLength = source.ocrTextLength ?? 0;
+    target.ocr = source.ocr ?? null;
+  }
 }
 
 async function listCommand(args) {
@@ -488,17 +876,35 @@ async function claimScreens(args) {
   const target = args.target ?? "default";
   const max = parsePositiveInteger(args.max, DEFAULT_CLAIM_MAX);
   const freshMs = parseNonNegativeInteger(args["fresh-ms"], DEFAULT_FRESH_MS);
+  const textOptions = textContextOptions(args);
+  const targetOptions = screenTargetOptions(args);
+  const targetSnapshot = targetOptions.enabled ? await collectScreenTargetSnapshot(store) : null;
+  const claimedTargetOptions = {
+    ...targetOptions,
+    snapshot: targetSnapshot,
+  };
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
 
-  return withStoreLock(store, async () => {
+  const claimed = await withStoreLock(store, async () => {
     const db = await readDb(store);
-    const screens = db.screens
+    const candidates = db.screens
       .filter((screen) => screenState(screen) === "ready")
       .filter((screen) => !screen.target || screen.target === target)
       .filter((screen) => nowMs - screenPreparedAtMs(screen) <= freshMs)
-      .sort((a, b) => screenPreparedAtMs(a) - screenPreparedAtMs(b))
-      .slice(0, max);
+      .sort((a, b) => screenPreparedAtMs(a) - screenPreparedAtMs(b));
+
+    const screens = [];
+    for (const screen of candidates) {
+      if (!(await existingFile(screen.optimizedPath))) {
+        screen.status = "cleared";
+        screen.clearedAt = now;
+        screen.clearReason = "optimized-file-missing";
+        continue;
+      }
+      screens.push(screen);
+      if (screens.length >= max) break;
+    }
 
     for (const screen of screens) {
       screen.status = "claimed";
@@ -507,8 +913,51 @@ async function claimScreens(args) {
     }
 
     await writeDb(store, db);
-    return { screens };
+    return screens;
   });
+
+  if (textOptions.enabled || targetOptions.enabled) {
+    try {
+      for (const screen of claimed) {
+        if (targetOptions.enabled) {
+          await applyScreenTargetToScreen(store, screen, claimedTargetOptions);
+        }
+        const effectiveTextOptions = {
+          ...textOptions,
+          forceRefresh: Boolean(targetSnapshot),
+        };
+        if (shouldRefreshTextContext(screen, effectiveTextOptions)) {
+          await applyTextContextToScreen(store, screen, effectiveTextOptions);
+        }
+      }
+      await withStoreLock(store, async () => {
+        const db = await readDb(store);
+        for (const enriched of claimed) {
+          const current = db.screens.find((screen) => screen.id === enriched.id);
+          if (current) mergeScreenEnrichment(current, enriched, {
+            text: textOptions,
+            screenTarget: targetOptions,
+          });
+        }
+        await writeDb(store, db);
+      });
+    } catch (error) {
+      await withStoreLock(store, async () => {
+        const db = await readDb(store);
+        for (const claimedScreen of claimed) {
+          const current = db.screens.find((screen) => screen.id === claimedScreen.id);
+          if (current && screenState(current) === "claimed" && current.claimedAt === now) {
+            current.status = "ready";
+            current.claimedAt = null;
+          }
+        }
+        await writeDb(store, db);
+      });
+      throw error;
+    }
+  }
+
+  return { screens: claimed };
 }
 
 async function clearCommand(args) {
@@ -525,20 +974,36 @@ async function clearCommand(args) {
     for (const screen of screens) {
       screen.status = "cleared";
       screen.clearedAt = now;
-      if (removeFiles) await rm(screen.optimizedPath, { force: true });
     }
 
     await writeDb(store, db);
-    return { cleared: screens.length };
+    const removablePaths = removeFiles
+      ? [...new Set(screens.map((screen) => screen.optimizedPath).filter(Boolean))]
+        .filter((path) => !db.screens.some((screen) => screenState(screen) !== "cleared" && screen.optimizedPath === path))
+      : [];
+    return {
+      cleared: screens.length,
+      removablePaths,
+      textIds: removeFiles ? screens.map((screen) => screen.id).filter(Boolean) : [],
+    };
   });
 
-  return writeResult(args, result);
+  if (removeFiles) {
+    await Promise.all(result.removablePaths.map((path) => rm(path, { force: true })));
+    await Promise.all(result.textIds.flatMap((id) => [
+      rm(join(store.textDir, `${id}.txt`), { force: true }),
+      rm(join(store.textDir, `${id}-screen-context.md`), { force: true }),
+    ]));
+  }
+
+  return writeResult(args, { cleared: result.cleared });
 }
 
 async function statusCommand(args) {
   const store = storePaths(args);
   await ensureStore(store);
   const db = await readDb(store);
+  const stats = await readStats(store);
   const screens = filterScreens(db.screens, args);
   const ready = screens.filter((screen) => screenState(screen) === "ready").length;
   const claimed = screens.filter((screen) => screenState(screen) === "claimed").length;
@@ -560,10 +1025,23 @@ async function statusCommand(args) {
       saved: Math.max(0, originalBytes - optimizedBytes),
       savedPercent: originalBytes > 0 ? round((1 - optimizedBytes / originalBytes) * 100, 1) : 0,
     },
-    latest: activeScreens.at(-1) ? publicScreen(activeScreens.at(-1)) : null,
+    latest: activeScreens.at(-1) ?? null,
+    historical: stats,
   };
   if (args.tokens || args["token-estimates"]) result.tokenEstimates = summarizeTokenEstimates(activeScreens);
   return writeResult(args, result);
+}
+
+async function statsCommand(args) {
+  const store = storePaths(args);
+  await ensureStore(store);
+  return writeResult(args, { stats: await readStats(store) });
+}
+
+async function gcCommand(args) {
+  const store = storePaths(args);
+  await ensureStore(store, { maintain: false });
+  return writeResult(args, await compactStore(store, { removeOrphans: true }));
 }
 
 async function copyCommand(args) {
@@ -577,9 +1055,12 @@ async function copyCommand(args) {
   if (format === "paths") {
     text = screens.map((screen) => screen.optimizedPath).join("\n");
   } else if (format === "json") {
-    text = JSON.stringify({ screens }, null, 2);
+    const projection = projectionOptions(args);
+    text = JSON.stringify({ screens: screens.map((screen) => publicScreen(screen, projection)) }, null, 2);
   } else if (format === "markdown") {
     text = screens.map((screen) => `![${screen.id}](${screen.optimizedPath})`).join("\n");
+  } else if (format === "text") {
+    text = screens.map((screen) => formatScreenTextSnippet(screen, args)).filter(Boolean).join("\n\n");
   } else {
     throw new Error(`Unknown copy format: ${format}`);
   }
@@ -657,28 +1138,60 @@ async function doctorCommand(args) {
   addToolCheck(checks, "osascript", "image clipboard helper");
   addToolCheck(checks, "pbcopy", "text clipboard helper");
   addToolCheck(checks, "defaults", "macOS screenshot location lookup");
+  add(
+    "browser dom text",
+    process.platform === "darwin" && commandExists("osascript") ? "pass" : "warn",
+    process.platform === "darwin" && commandExists("osascript")
+      ? "available for supported frontmost browsers when automation permission is granted"
+      : "requires macOS osascript browser automation",
+  );
 
   const sharp = await loadSharpModule();
   add(
-    "sharp optimizer",
-    sharp ? "pass" : "warn",
-    sharp ? `sharp ${sharp.versions?.sharp ?? "available"}` : "sharp not available; will fall back to native ImageIO",
+    "optional sharp optimizer",
+    "pass",
+    sharp ? `sharp ${sharp.versions?.sharp ?? "available"}` : "not installed; native ImageIO is the default",
   );
 
   const hasXcrun = commandExists("xcrun");
-  const hasNativeSource = await existingFile(NATIVE_OPTIMIZER_SOURCE);
-  if (!hasNativeSource) {
-    add("native optimizer", "warn", `missing helper source: ${NATIVE_OPTIMIZER_SOURCE}`);
-  } else if (!hasXcrun) {
-    add("native optimizer", "warn", "xcrun not found; will fall back to sips");
-  } else {
+  const addSwiftHelperCheck = async (name, sourcePath, messages) => {
+    if (!(await existingFile(sourcePath))) {
+      add(name, "warn", `missing helper source: ${sourcePath}`);
+      return;
+    }
+    if (!hasXcrun) {
+      add(name, "warn", messages.noXcrun);
+      return;
+    }
     const swiftc = run("xcrun", ["-find", "swiftc"], { timeoutMs: 5000 });
     add(
-      "native optimizer",
+      name,
       swiftc.status === 0 ? "pass" : "warn",
-      swiftc.status === 0 ? "Swift compiler available" : "Swift compiler not found; will fall back to sips",
+      swiftc.status === 0 ? messages.available : messages.noSwiftc,
     );
-  }
+  };
+
+  await addSwiftHelperCheck("native optimizer", NATIVE_OPTIMIZER_SOURCE, {
+    available: "Swift compiler available",
+    noXcrun: "xcrun not found; will fall back to sips",
+    noSwiftc: "Swift compiler not found; will fall back to sips",
+  });
+  await addSwiftHelperCheck("apple vision ocr", APPLE_VISION_OCR_SOURCE, {
+    available: "Apple Vision OCR helper can be built",
+    noXcrun: "xcrun not found; --ocr and --with-text will be unavailable",
+    noSwiftc: "Swift compiler not found; --ocr and --with-text will be unavailable",
+  });
+  await addSwiftHelperCheck("screen target context", SCREEN_TARGET_SNAPSHOT_SOURCE, {
+    available: "screen target helper can be built",
+    noXcrun: "xcrun not found; --with-target-context will be unavailable",
+    noSwiftc: "Swift compiler not found; --with-target-context will be unavailable",
+  });
+  await addSwiftHelperCheck("macos accessibility text", MACOS_ACCESSIBILITY_TEXT_SOURCE, {
+    available: "accessibility text helper can be built",
+    noXcrun: "xcrun not found; accessibility text provider will be unavailable",
+    noSwiftc: "Swift compiler not found; accessibility text provider will be unavailable",
+  });
+  await addAccessibilityPermissionCheck(add, store, args);
 
   const defaultOptions = optimizationOptions(args);
   const autoWatch = resolveWatchTarget({});
@@ -709,6 +1222,41 @@ async function doctorCommand(args) {
   return writeText(formatDoctor(result));
 }
 
+async function addAccessibilityPermissionCheck(add, store, args = {}) {
+  if (process.platform !== "darwin") {
+    add("accessibility permission", "warn", "macOS Accessibility is unavailable on this platform");
+    return;
+  }
+
+  const binary = await macosAccessibilityTextBinary(store);
+  if (!binary) {
+    add("accessibility permission", "warn", "accessibility text helper is unavailable");
+    return;
+  }
+
+  const shouldPrompt = Boolean(args["prompt-permissions"] || args.promptPermissions);
+  const result = run(binary, ["--check", ...(shouldPrompt ? ["--prompt"] : [])], { timeoutMs: 5000 });
+  if (result.status !== 0) {
+    add("accessibility permission", "warn", (result.stderr || result.stdout || `helper exited with ${result.status}`).trim());
+    return;
+  }
+
+  const parsed = parseJsonish(result.stdout);
+  if (parsed.trusted === true || parsed.status === "ready") {
+    add("accessibility permission", "pass", "granted");
+    return;
+  }
+
+  add(
+    "accessibility permission",
+    "warn",
+    parsed.prompted
+      ? "permission prompt opened; grant access, then rerun doctor"
+      : "missing; run `screenshotter doctor --prompt-permissions` to request it",
+    { prompted: Boolean(parsed.prompted), trusted: false },
+  );
+}
+
 async function codexCommand(argv) {
   const { args, appArgv, result } = await claimForWrapper(argv, "codex");
 
@@ -722,7 +1270,7 @@ async function codexCommand(argv) {
     return writeText(`${JSON.stringify({
       command: "codex",
       args: codexArgs,
-      screens: result.screens.map(publicScreen),
+      screens: result.screens.map((screen) => publicScreen(screen, projectionOptions(args))),
     }, null, 2)}\n`);
   }
 
@@ -737,7 +1285,7 @@ async function claudeCommand(argv) {
     return writeText(`${JSON.stringify({
       command: "claude",
       args: claudeArgs,
-      screens: result.screens.map(publicScreen),
+      screens: result.screens.map((screen) => publicScreen(screen, projectionOptions(args))),
     }, null, 2)}\n`);
   }
 
@@ -875,23 +1423,31 @@ async function clipboardCommand(args, options = {}) {
   const result = await prepareLatest({ ...args, target });
   const screen = result.screen;
   const shouldReveal = Boolean(args.reveal);
-  const shouldCopyImage = !shouldReveal && !args["dry-run"];
+  const mode = clipboardDeliveryMode(args);
+  const clipboard = shouldReveal
+    ? { status: null, label: null, textCopied: false }
+    : args["dry-run"]
+      ? { status: `${mode}-dry-run`, label: "clipboard dry-run", textCopied: mode !== "image" && Boolean(formatScreenTextSnippet(screen, args)) }
+      : await copyScreenToClipboard(screen, args);
 
-  if (shouldCopyImage) await copyImageToClipboard(screen.optimizedPath);
   await reportScreenEvent(args, storePaths(args), "clipboard", screen, {
     prepared: result.prepared,
-    clipboard: shouldReveal ? null : (shouldCopyImage ? "image" : "image-dry-run"),
+    clipboard: clipboard.status,
+    textCopied: clipboard.textCopied,
     appLabel,
   });
 
   if (args.json || args["dry-run"]) {
-    return writeResult({ json: true }, {
+    return writeResult({ ...args, json: true }, {
       path: screen.optimizedPath,
       prepared: result.prepared,
       target,
-      clipboard: shouldReveal ? null : (shouldCopyImage ? "image" : "image-dry-run"),
+      clipboard: clipboard.status,
+      textCopied: clipboard.textCopied,
       attach: shouldReveal
         ? "Use the app's file picker or drag this file into the prompt."
+        : clipboard.pasted
+          ? `Already pasted into ${appLabel}.`
         : `Paste into ${appLabel} with Cmd+V.`,
       screen,
     });
@@ -906,7 +1462,9 @@ async function clipboardCommand(args, options = {}) {
     `Prepared: ${screen.optimizedPath}`,
     shouldReveal
       ? "Attach it with the app's file picker, or drag the revealed file into the prompt."
-      : `The optimized image is on the clipboard. Paste it into ${appLabel} with Cmd+V.`,
+      : clipboard.pasted
+        ? `Pasted ${clipboard.label} into ${appLabel}.`
+      : `The ${clipboard.label} is on the clipboard. Paste it into ${appLabel} with Cmd+V.`,
   ].filter(Boolean).join("\n") + "\n");
 }
 
@@ -931,6 +1489,11 @@ async function benchCommand(args) {
   const screenshotDir = resolve(expandHome(args.dir ?? macScreenshotDir()));
   const files = await latestImages(screenshotDir, limit);
   const options = optimizationOptions(args);
+  const contextOptions = {
+    text: textContextOptions(args),
+    screenTarget: screenTargetOptions(args),
+  };
+  const hasContextOptions = contextOptions.text.enabled || contextOptions.screenTarget.enabled;
   const requestedOptimizer = normalizeOptimizer(args.optimizer ?? options.optimizer ?? "native");
   const dataDir = args["data-dir"]
     ? resolve(expandHome(args["data-dir"]))
@@ -941,17 +1504,18 @@ async function benchCommand(args) {
 
   let effectiveOptimizer = requestedOptimizer;
   let rows;
-  if (requestedOptimizer === "native") {
+  if (requestedOptimizer === "native" && !hasContextOptions) {
     rows = await benchNativeBatch(store, files, args, { ...options, optimizer: "native" });
   } else {
-    rows = await benchPrepareRows(store, files, args, { ...options, optimizer: requestedOptimizer });
+    rows = await benchPrepareRows(store, files, args, { ...options, optimizer: requestedOptimizer }, contextOptions);
   }
   if (!rows && requestedOptimizer === "native") {
     effectiveOptimizer = "sips";
-    rows = await benchPrepareRows(store, files, args, { ...options, optimizer: "sips" });
+    rows = await benchPrepareRows(store, files, args, { ...options, optimizer: "sips" }, contextOptions);
   }
 
   const durations = rows.map((row) => row.durationMs).sort((a, b) => a - b);
+  const wallDurations = rows.map((row) => row.wallMs ?? row.durationMs).sort((a, b) => a - b);
   const originalBytes = rows.reduce((sum, row) => sum + row.originalBytes, 0);
   const optimizedBytes = rows.reduce((sum, row) => sum + row.optimizedBytes, 0);
   const timing = {
@@ -959,6 +1523,12 @@ async function benchCommand(args) {
     median: durations[Math.floor(durations.length / 2)] ?? 0,
     max: durations.at(-1) ?? 0,
     avg: round(durations.reduce((sum, value) => sum + value, 0) / Math.max(durations.length, 1), 1),
+  };
+  const wallTiming = {
+    min: wallDurations[0] ?? 0,
+    median: wallDurations[Math.floor(wallDurations.length / 2)] ?? 0,
+    max: wallDurations.at(-1) ?? 0,
+    avg: round(wallDurations.reduce((sum, value) => sum + value, 0) / Math.max(wallDurations.length, 1), 1),
   };
   const result = {
     screenshotDir,
@@ -975,6 +1545,7 @@ async function benchCommand(args) {
     },
     sampleCount: rows.length,
     prepareMs: timing,
+    wallMs: wallTiming,
     originalBytes,
     optimizedBytes,
     savedPercent: originalBytes > 0 ? round((1 - optimizedBytes / originalBytes) * 100, 1) : 0,
@@ -984,15 +1555,19 @@ async function benchCommand(args) {
   return writeResult(args, result);
 }
 
-async function benchPrepareRows(store, files, args, options) {
+async function benchPrepareRows(store, files, args, options, contextOptions = {}) {
   const rows = [];
   for (const file of files) {
+    const wallStarted = performance.now();
     const sourceStat = await waitForStableFile(file);
     if (!sourceStat) continue;
+    const fileWaitMs = performance.now() - wallStarted;
     const started = performance.now();
-    const result = await prepareOne(store, file, sourceStat, args.target ?? "bench", options);
+    const result = await prepareOne(store, file, sourceStat, args.target ?? "bench", options, contextOptions);
     const durationMs = performance.now() - started;
     const row = benchRowFromScreen(file, result.screen, options, durationMs, result.prepared);
+    row.fileWaitMs = round(fileWaitMs, 1);
+    row.wallMs = round(performance.now() - wallStarted, 1);
     if (args.tokens || args["token-estimates"]) row.tokenEstimates = tokenEstimatesForDimensions(row);
     rows.push(row);
   }
@@ -1053,7 +1628,7 @@ async function benchNativeBatch(store, files, args, rawOptions = {}) {
 }
 
 function benchRowFromScreen(file, screen, options, durationMs, prepared) {
-  return {
+  const row = {
     path: file,
     ext: extname(file).toLowerCase(),
     originalBytes: screen.originalBytes,
@@ -1075,6 +1650,38 @@ function benchRowFromScreen(file, screen, options, durationMs, prepared) {
     prepared,
     optimizer: screen.optimizer ?? options.optimizer ?? "sips",
   };
+  if (screen.screenTarget) {
+    row.screenTarget = {
+      status: screen.screenTarget.status ?? null,
+      durationMs: screen.screenTarget.durationMs ?? null,
+      app: screen.screenTarget.frontmostApp?.name ?? null,
+      pointerApp: screen.screenTarget.pointerWindow?.app?.name ?? screen.screenTarget.pointerWindow?.ownerName ?? null,
+    };
+  }
+  if (Array.isArray(screen.textSources) && screen.textSources.length > 0) {
+    row.textSources = screen.textSources.map((source) => ({
+      provider: source.provider,
+      status: source.status,
+      durationMs: source.durationMs ?? null,
+      textLength: source.textLength ?? 0,
+    }));
+  }
+  if (screen.textContext) {
+    row.textContext = {
+      provider: screen.textContext.provider ?? null,
+      durationMs: screen.textContext.durationMs ?? null,
+      textLength: screen.textContext.text?.length ?? 0,
+    };
+  }
+  return row;
+}
+
+function recentCompressionHistory(screens, limit = 3) {
+  return screens
+    .filter((screen) => screen.originalBytes !== undefined && screen.optimizedBytes !== undefined)
+    .sort((a, b) => screenPreparedAtMs(b) - screenPreparedAtMs(a))
+    .slice(0, limit)
+    .map(compressionHistoryEntry);
 }
 
 function compressionHistoryEntry(screen) {
@@ -1113,9 +1720,29 @@ function formatWatchPrepareLine(result, screen, durationMs, clipboardLabel, args
     verbose ? screen.id : undefined,
     formatCompressionSummary(screen),
     formatOptimizerSummary(screen, { verbose }),
+    formatTextSummary(screen, { verbose }),
+    formatOcrSummary(screen, { verbose }),
     `in ${durationMs}ms`,
     clipboardLabel,
   ].filter(Boolean).join(" ") + "\n";
+}
+
+function formatOcrSummary(screen, { verbose = false } = {}) {
+  if (screen.textContext?.provider === "apple-vision-ocr") return undefined;
+  if (!screen.ocr) return undefined;
+  if (screen.ocr.status === "ready") return verbose ? `ocr ${screen.ocrTextLength ?? 0} chars` : "ocr";
+  if (screen.ocr.status === "empty") return verbose ? "ocr empty" : undefined;
+  return verbose ? `ocr ${screen.ocr.status}` : undefined;
+}
+
+function formatTextSummary(screen, { verbose = false } = {}) {
+  if (screen.textContext?.text) {
+    const provider = screen.textContext.provider ?? "text";
+    return verbose ? `${provider} ${screen.textContext.text.length} chars` : provider;
+  }
+  if (!verbose || !Array.isArray(screen.textSources) || screen.textSources.length === 0) return undefined;
+  const failed = screen.textSources.find((source) => source.status && source.status !== "skipped");
+  return failed ? `${failed.provider} ${failed.status}` : undefined;
 }
 
 function formatOptimizerSummary(screen, { verbose = false } = {}) {
@@ -1307,7 +1934,7 @@ async function createNativeCandidate(store, inputPath, stem, resizeLongEdge, ori
 
   const options = normalizeOptimizationOptions(rawOptions);
   const maxLongEdge = resizeLongEdge ?? options.maxLongEdge;
-  const result = run(binary, [
+  const result = await runAsync(binary, [
     "--out-dir", store.optimizedDir,
     "--stem", stem,
     "--max-long-edge", String(maxLongEdge),
@@ -1345,7 +1972,7 @@ async function createSipsCandidate(inputPath, outputPath, outputExt, resizeLongE
   if (resizeLongEdge !== undefined) args.push("--resampleHeightWidthMax", String(resizeLongEdge));
   args.push(inputPath, "--out", outputPath);
 
-  const result = run("sips", args, { timeoutMs: 15_000 });
+  const result = await runAsync("sips", args, { timeoutMs: 15_000 });
   if (result.status !== 0) return undefined;
   return candidateFromPath(outputPath, outputExt, mimeType, originalMetadata, optimized, "sips");
 }
@@ -1516,72 +2143,731 @@ function optimizationKey(rawOptions = {}) {
   ].join(";");
 }
 
-async function nativeOptimizerBinary(store) {
-  const cacheKey = store.dataDir;
-  if (nativeOptimizerBinaries.has(cacheKey)) return nativeOptimizerBinaries.get(cacheKey) ?? undefined;
+function normalizePrepareContextOptions(rawOptions = {}) {
+  const textRaw = rawOptions.text ?? rawOptions.textContext ?? rawOptions;
+  const screenTargetRaw = rawOptions.screenTarget ?? rawOptions.targetContext ?? {};
+  return {
+    text: normalizeTextContextOptions(textRaw),
+    screenTarget: normalizeScreenTargetOptions(screenTargetRaw),
+  };
+}
 
-  if (!commandExists("xcrun") || !(await existingFile(NATIVE_OPTIMIZER_SOURCE))) {
-    nativeOptimizerBinaries.set(cacheKey, null);
-    return undefined;
+function screenTargetOptions(args = {}) {
+  return normalizeScreenTargetOptions({
+    enabled: Boolean(args["with-target-context"] || args["target-context"] || args.withTargetContext || args.targetContext),
+  });
+}
+
+function normalizeScreenTargetOptions(rawOptions = {}) {
+  const enabled = Boolean(rawOptions.enabled);
+  return {
+    enabled,
+    snapshot: rawOptions.snapshot ? normalizeScreenTargetSnapshot(rawOptions.snapshot) : null,
+    key: `enabled=${enabled ? 1 : 0}`,
+  };
+}
+
+function shouldRefreshScreenTarget(screen, options) {
+  if (!options.enabled) return false;
+  return Boolean(options.snapshot) || screen.screenTargetKey !== options.key || screen.screenTarget === undefined;
+}
+
+async function applyScreenTargetToScreen(store, screen, rawOptions = {}) {
+  const options = normalizeScreenTargetOptions(rawOptions);
+  if (!options.enabled) return;
+  screen.screenTarget = options.snapshot ?? await collectScreenTargetSnapshot(store);
+  screen.screenTargetKey = options.key;
+}
+
+async function collectScreenTargetSnapshot(store) {
+  const started = performance.now();
+  if (process.env.SCREENSHOTTER_SCREEN_TARGET_JSON !== undefined) {
+    const parsed = parseJsonish(process.env.SCREENSHOTTER_SCREEN_TARGET_JSON);
+    return normalizeScreenTargetSnapshot({
+      status: "ready",
+      ...parsed,
+      durationMs: round(performance.now() - started, 1),
+    });
   }
 
-  const helperDir = join(store.dataDir, "helpers");
-  const outputPath = join(helperDir, "native-image-optimizer");
-  const moduleCachePath = join(helperDir, "swift-module-cache");
-  await mkdir(moduleCachePath, { recursive: true });
-
-  if (await needsRefresh(outputPath, NATIVE_OPTIMIZER_SOURCE)) {
-    const result = run("xcrun", [
-      "swiftc",
-      "-module-cache-path", moduleCachePath,
-      NATIVE_OPTIMIZER_SOURCE,
-      "-o", outputPath,
-    ], {
-      env: { CLANG_MODULE_CACHE_PATH: moduleCachePath },
-      timeoutMs: 60_000,
+  if (process.platform !== "darwin") {
+    return normalizeScreenTargetSnapshot({
+      status: "unavailable",
+      error: "screen target snapshot requires macOS",
+      collectedAt: new Date().toISOString(),
+      durationMs: round(performance.now() - started, 1),
     });
-    if (result.status !== 0) {
-      nativeOptimizerBinaries.set(cacheKey, null);
-      return undefined;
+  }
+
+  const binary = await screenTargetSnapshotBinary(store);
+  if (!binary) {
+    return normalizeScreenTargetSnapshot({
+      status: "unavailable",
+      error: "screen target snapshot helper is unavailable",
+      collectedAt: new Date().toISOString(),
+      durationMs: round(performance.now() - started, 1),
+    });
+  }
+
+  const result = await runAsync(binary, [], { timeoutMs: 5000 });
+  if (result.status !== 0) {
+    return normalizeScreenTargetSnapshot({
+      status: "failed",
+      error: (result.stderr || result.stdout || `screen target helper exited with ${result.status}`).trim(),
+      collectedAt: new Date().toISOString(),
+      durationMs: round(performance.now() - started, 1),
+    });
+  }
+
+  const parsed = parseJsonish(result.stdout);
+  return normalizeScreenTargetSnapshot({
+    status: "ready",
+    ...parsed,
+    durationMs: round(performance.now() - started, 1),
+  });
+}
+
+function normalizeScreenTargetSnapshot(snapshot = {}) {
+  return {
+    status: snapshot.status ?? "ready",
+    collectedAt: snapshot.collectedAt ?? new Date().toISOString(),
+    durationMs: snapshot.durationMs ?? null,
+    frontmostApp: snapshot.frontmostApp ?? null,
+    pointer: snapshot.pointer ?? null,
+    pointerWindow: snapshot.pointerWindow ?? null,
+    error: snapshot.error ?? null,
+  };
+}
+
+function textContextOptions(args = {}) {
+  return normalizeTextContextOptions({
+    enabled: shouldCollectTextContext(args),
+    provider: args["text-provider"] ?? args.textProvider ?? (args.ocr ? "ocr" : DEFAULT_TEXT_PROVIDER),
+    noOcr: Boolean(args["no-ocr"]),
+    ocrLevel: args["ocr-level"] ?? args.ocrLevel,
+    ocrLanguages: args["ocr-languages"] ?? args.ocrLanguages,
+    usesLanguageCorrection: !args["no-language-correction"],
+    requireOcr: Boolean(args["require-ocr"] || args.requireOcr),
+    maxChars: args["text-max-chars"] ?? args.textMaxChars,
+  });
+}
+
+function shouldCollectTextContext(args = {}) {
+  if (args["no-text"]) return false;
+  if (args.ocr || args.text || args["with-text"]) return true;
+  const rawMode = args["clipboard-mode"] ?? args.clipboardMode;
+  const mode = rawMode === undefined ? undefined : normalizeClipboardMode(rawMode);
+  if (mode === "both" || mode === "text" || mode === "files" || mode === "attachments" || mode === "markdown" || mode === "codex-inline") return true;
+  const provider = args["text-provider"] ?? args.textProvider;
+  return provider !== undefined && provider !== "none";
+}
+
+function normalizeTextContextOptions(rawOptions = {}) {
+  const provider = normalizeTextProvider(rawOptions.provider ?? DEFAULT_TEXT_PROVIDER);
+  const maxChars = parsePositiveInteger(rawOptions.maxChars ?? rawOptions.textMaxChars, DEFAULT_TEXT_SNIPPET_MAX_CHARS);
+  const ocr = normalizeOcrOptions({
+    enabled: provider === "ocr" || provider === "auto",
+    level: rawOptions.ocrLevel ?? rawOptions.level,
+    languages: rawOptions.ocrLanguages ?? rawOptions.languages,
+    usesLanguageCorrection: rawOptions.usesLanguageCorrection,
+    required: rawOptions.requireOcr ?? rawOptions.required,
+  });
+  const noOcr = Boolean(rawOptions.noOcr);
+  const enabled = Boolean(rawOptions.enabled) && provider !== "none";
+
+  return {
+    enabled,
+    provider,
+    noOcr,
+    maxChars,
+    forceRefresh: Boolean(rawOptions.forceRefresh),
+    ocr,
+    key: [
+      `provider=${provider}`,
+      `noOcr=${noOcr ? 1 : 0}`,
+      `maxChars=${maxChars}`,
+      `ocr=${ocr.key}`,
+    ].join(";"),
+  };
+}
+
+function normalizeTextProvider(value) {
+  const normalized = String(value ?? DEFAULT_TEXT_PROVIDER).toLowerCase();
+  if (normalized === "auto") return "auto";
+  if (normalized === "none" || normalized === "off") return "none";
+  if (normalized === "browser" || normalized === "browser-dom" || normalized === "dom") return "browser-dom";
+  if (normalized === "accessibility" || normalized === "ax" || normalized === "macos-accessibility") return "accessibility";
+  if (normalized === "ocr" || normalized === "apple-vision" || normalized === "apple-vision-ocr") return "ocr";
+  throw new Error(`Unknown text provider: ${value}. Use auto, browser-dom, accessibility, ocr, or none.`);
+}
+
+function normalizeOcrOptions(rawOptions = {}) {
+  const languages = normalizeOcrLanguages(rawOptions.languages ?? rawOptions.ocrLanguages ?? DEFAULT_OCR_LANGUAGES);
+  const level = rawOptions.level ?? rawOptions.ocrLevel ?? DEFAULT_OCR_LEVEL;
+  if (level !== "accurate" && level !== "fast") throw new Error(`Unknown OCR level: ${level}. Use accurate or fast.`);
+
+  return {
+    enabled: Boolean(rawOptions.enabled),
+    level,
+    languages,
+    usesLanguageCorrection: rawOptions.usesLanguageCorrection !== false,
+    required: Boolean(rawOptions.required),
+    key: [
+      `level=${level}`,
+      `languages=${languages.join(",")}`,
+      `correction=${rawOptions.usesLanguageCorrection === false ? 0 : 1}`,
+    ].join(";"),
+  };
+}
+
+function normalizeOcrLanguages(value) {
+  const values = Array.isArray(value)
+    ? value
+    : String(value ?? DEFAULT_OCR_LANGUAGES.join(",")).split(",");
+  const languages = values
+    .map((language) => String(language).trim())
+    .filter(Boolean);
+  return languages.length > 0 ? languages : DEFAULT_OCR_LANGUAGES;
+}
+
+function shouldRefreshTextContext(screen, options) {
+  if (!options.enabled) return false;
+  return options.forceRefresh || screen.textContextKey !== options.key || screen.textContext === undefined;
+}
+
+async function applyTextContextToScreen(store, screen, rawOptions = {}) {
+  const options = normalizeTextContextOptions(rawOptions);
+  const result = await collectTextContext(store, screen, options);
+  applyTextContextResultToScreen(screen, result, options);
+}
+
+function applyTextContextResultToScreen(screen, result, options) {
+  screen.textContext = result.textContext;
+  screen.textSources = result.sources;
+  screen.textContextKey = options.key;
+
+  const ocrSource = result.sources.find((source) => source.provider === "apple-vision-ocr");
+  if (ocrSource) {
+    applyOcrSourceCompatibility(screen, ocrSource, options.ocr);
+  } else {
+    screen.ocrText = null;
+    screen.ocrTextLength = 0;
+    screen.ocr = null;
+  }
+}
+
+async function collectTextContext(store, screen, rawOptions = {}) {
+  const options = normalizeTextContextOptions(rawOptions);
+  if (!options.enabled) return { textContext: null, sources: [] };
+  return collectTextContextProviders(store, screen, options, textProviderSequence(options));
+}
+
+async function collectTextContextProviders(store, screen, options, providers, initialSources = []) {
+  const sources = [...(initialSources ?? [])];
+  for (const provider of providers) {
+    let source;
+    if (provider === "browser-dom") source = await collectBrowserDomText(screen, options);
+    else if (provider === "accessibility") source = await collectAccessibilityTextSource(store, screen, options);
+    else if (provider === "ocr") source = await collectOcrTextSource(store, screen.sourcePath, {
+      ...options.ocr,
+      maxChars: options.maxChars,
+    });
+    else continue;
+
+    sources.push(source);
+    if (source.provider === "apple-vision-ocr" && options.ocr.required && source.status !== "ready" && source.status !== "empty") {
+      throw new Error(source.error || `OCR failed with status ${source.status}`);
+    }
+    if (source.status === "ready" && normalizeTextContextText(source.text)) {
+      return {
+        textContext: textContextFromSource(source, options.maxChars),
+        sources,
+      };
     }
   }
 
-  nativeOptimizerBinaries.set(cacheKey, outputPath);
-  return outputPath;
+  return { textContext: null, sources };
+}
+
+function textProviderSequence(options) {
+  switch (options.provider) {
+    case "browser-dom":
+      return ["browser-dom"];
+    case "accessibility":
+      return ["accessibility"];
+    case "ocr":
+      return options.noOcr ? [] : ["ocr"];
+    case "auto":
+      return options.noOcr ? ["accessibility"] : ["accessibility", "ocr"];
+    case "none":
+    default:
+      return [];
+  }
+}
+
+function textContextFromSource(source, maxChars = DEFAULT_TEXT_SNIPPET_MAX_CHARS) {
+  return {
+    text: limitTextContext(source.text, maxChars),
+    provider: source.provider,
+    source: source.source ?? null,
+    app: source.app ?? null,
+    windowTitle: source.windowTitle ?? null,
+    url: source.url ?? null,
+    confidence: source.confidence ?? null,
+    durationMs: source.durationMs ?? null,
+    collectedAt: source.collectedAt ?? new Date().toISOString(),
+  };
+}
+
+async function collectBrowserDomText(screen, options) {
+  const started = performance.now();
+  if (process.env.SCREENSHOTTER_BROWSER_DOM_TEXT !== undefined) {
+    const text = limitTextContext(process.env.SCREENSHOTTER_BROWSER_DOM_TEXT, options.maxChars);
+    return textSourceResult({
+      provider: "browser-dom",
+      status: text ? "ready" : "empty",
+      text,
+      app: process.env.SCREENSHOTTER_BROWSER_DOM_APP ?? "Mock Browser",
+      windowTitle: process.env.SCREENSHOTTER_BROWSER_DOM_TITLE ?? "Mock Tab",
+      url: process.env.SCREENSHOTTER_BROWSER_DOM_URL ?? null,
+      source: "environment",
+      confidence: 1,
+      started,
+    });
+  }
+
+  if (process.platform !== "darwin") {
+    return textSourceResult({
+      provider: "browser-dom",
+      status: "unavailable",
+      error: "browser DOM provider requires macOS automation",
+      started,
+    });
+  }
+
+  const target = preferredScreenTarget(screen);
+  const result = await runAsync("osascript", ["-l", "JavaScript", "-e", browserDomJxaScript({
+    appName: target?.name,
+    maxChars: options.maxChars,
+  })], { timeoutMs: 3000 });
+  if (result.status !== 0) {
+    return textSourceResult({
+      provider: "browser-dom",
+      status: "failed",
+      error: (result.stderr || result.stdout || `osascript exited with ${result.status}`).trim(),
+      started,
+    });
+  }
+
+  const parsed = parseJsonish(result.stdout);
+  const text = limitTextContext(parsed.selectedText || parsed.text || "", options.maxChars);
+  return textSourceResult({
+    provider: "browser-dom",
+    status: parsed.status === "ready" && text ? "ready" : parsed.status || (text ? "ready" : "empty"),
+    text,
+    app: parsed.app ?? null,
+    windowTitle: parsed.windowTitle ?? parsed.title ?? null,
+    url: parsed.url ?? null,
+    source: parsed.source ?? "frontmost browser",
+    confidence: text ? 1 : 0,
+    error: parsed.error ?? null,
+    started,
+  });
+}
+
+function browserDomJxaScript({ appName: requestedAppName, maxChars }) {
+  const safeAppName = JSON.stringify(requestedAppName ?? "");
+  const safeMaxChars = parsePositiveInteger(maxChars, DEFAULT_TEXT_SNIPPET_MAX_CHARS);
+  return `
+ObjC.import("AppKit");
+
+const requestedAppName = ${safeAppName};
+const maxChars = ${safeMaxChars};
+
+function appName() {
+  const app = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+  return app ? ObjC.unwrap(app.localizedName) : "";
+}
+
+function supportedBrowser(name) {
+  return [
+    "Google Chrome",
+    "Chromium",
+    "Brave Browser",
+    "Microsoft Edge",
+    "Arc",
+    "Safari"
+  ].indexOf(name) !== -1;
+}
+
+function payloadJavaScript() {
+  return "(function(){var selected=String(window.getSelection?window.getSelection():'');var body=document.body?document.body.innerText:'';return JSON.stringify({title:document.title||'',url:location.href||'',selectedText:selected.slice(0,${safeMaxChars}),text:(selected||body).slice(0,${safeMaxChars})});})()";
+}
+
+function run() {
+  const name = requestedAppName || appName();
+  if (!supportedBrowser(name)) {
+    return JSON.stringify({ status: "unavailable", app: name, error: "frontmost app is not a supported browser" });
+  }
+
+  try {
+    const app = Application(name);
+    const js = payloadJavaScript();
+    let raw;
+    if (name === "Safari") {
+      if (app.documents.length === 0) return JSON.stringify({ status: "empty", app: name, error: "no Safari document" });
+      raw = app.doJavaScript(js, { in: app.documents[0] });
+    } else {
+      if (app.windows.length === 0) return JSON.stringify({ status: "empty", app: name, error: "no browser window" });
+      raw = app.windows[0].activeTab().execute({ javascript: js });
+    }
+
+    const parsed = JSON.parse(raw || "{}");
+    const text = parsed.selectedText || parsed.text || "";
+    return JSON.stringify({
+      status: text ? "ready" : "empty",
+      app: name,
+      source: name + " active tab",
+      windowTitle: parsed.title || "",
+      url: parsed.url || "",
+      selectedText: parsed.selectedText || "",
+      text: text
+    });
+  } catch (error) {
+    return JSON.stringify({ status: "failed", app: name, error: String(error) });
+  }
+}
+`;
+}
+
+async function collectOcrTextSource(store, path, options) {
+  const started = performance.now();
+  if (process.env.SCREENSHOTTER_OCR_TEXT !== undefined) {
+    const text = limitTextContext(process.env.SCREENSHOTTER_OCR_TEXT, options.maxChars);
+    return textSourceResult({
+      provider: "apple-vision-ocr",
+      status: text ? "ready" : "empty",
+      text,
+      source: "source screenshot",
+      confidence: text ? 0.85 : 0,
+      started,
+      ocr: {
+        key: options.key,
+        level: options.level,
+        languages: options.languages,
+        usesLanguageCorrection: options.usesLanguageCorrection,
+      },
+    });
+  }
+  const result = await extractTextFromImage(store, path, options);
+  return textSourceResult({
+    provider: "apple-vision-ocr",
+    status: result.status,
+    text: limitTextContext(result.text ?? "", options.maxChars),
+    source: "source screenshot",
+    confidence: result.status === "ready" ? 0.85 : 0,
+    error: result.error ?? null,
+    ocr: {
+      key: options.key,
+      level: options.level,
+      languages: options.languages,
+      usesLanguageCorrection: options.usesLanguageCorrection,
+    },
+    started,
+  });
+}
+
+function collectUnavailableTextSource(provider, error) {
+  return textSourceResult({
+    provider,
+    status: "unavailable",
+    error,
+    started: performance.now(),
+  });
+}
+
+async function collectAccessibilityTextSource(store, screen, options) {
+  const started = performance.now();
+  const target = preferredScreenTarget(screen);
+  if (process.env.SCREENSHOTTER_ACCESSIBILITY_TEXT !== undefined) {
+    const text = limitTextContext(process.env.SCREENSHOTTER_ACCESSIBILITY_TEXT, options.maxChars);
+    return textSourceResult({
+      provider: "macos-accessibility",
+      status: text ? "ready" : "empty",
+      text,
+      app: process.env.SCREENSHOTTER_ACCESSIBILITY_APP ?? target?.name ?? "Mock App",
+      windowTitle: process.env.SCREENSHOTTER_ACCESSIBILITY_TITLE ?? null,
+      source: "environment",
+      confidence: 0.9,
+      started,
+    });
+  }
+
+  if (process.platform !== "darwin") {
+    return textSourceResult({
+      provider: "macos-accessibility",
+      status: "unavailable",
+      error: "macOS Accessibility provider requires macOS",
+      started,
+    });
+  }
+
+  const binary = await macosAccessibilityTextBinary(store);
+  if (!binary) {
+    return textSourceResult({
+      provider: "macos-accessibility",
+      status: "unavailable",
+      error: "macOS Accessibility helper is unavailable",
+      started,
+    });
+  }
+
+  const args = [];
+  if (target?.pid) args.push("--pid", String(target.pid));
+  args.push("--max-chars", String(options.maxChars));
+
+  const result = await runAsync(binary, args, { timeoutMs: 4000 });
+  if (result.status !== 0) {
+    return textSourceResult({
+      provider: "macos-accessibility",
+      status: "failed",
+      error: (result.stderr || result.stdout || `accessibility helper exited with ${result.status}`).trim(),
+      started,
+    });
+  }
+
+  const parsed = parseJsonish(result.stdout);
+  const text = limitTextContext(parsed.text ?? "", options.maxChars);
+  return textSourceResult({
+    provider: "macos-accessibility",
+    status: parsed.status === "ready" && text ? "ready" : parsed.status || (text ? "ready" : "empty"),
+    text,
+    app: parsed.app ?? target?.name ?? null,
+    windowTitle: parsed.windowTitle ?? null,
+    source: parsed.source ?? "macOS Accessibility",
+    confidence: text ? 0.9 : 0,
+    error: parsed.error ?? null,
+    started,
+  });
+}
+
+function preferredScreenTarget(screen) {
+  const pointerWindow = screen?.screenTarget?.pointerWindow;
+  const pointerApp = pointerWindow?.app;
+  const pointerPid = pointerWindow?.pid ?? pointerApp?.pid;
+  if (pointerPid) {
+    return {
+      pid: pointerPid,
+      name: pointerApp?.name ?? pointerWindow?.ownerName ?? null,
+      bundleId: pointerApp?.bundleId ?? null,
+      source: "pointer-window",
+    };
+  }
+
+  const frontmost = screen?.screenTarget?.frontmostApp;
+  return frontmost?.pid ? { ...frontmost, source: "frontmost-app" } : null;
+}
+
+function textSourceResult(source) {
+  const text = normalizeTextContextText(source.text ?? "");
+  return {
+    provider: source.provider,
+    status: source.status,
+    text,
+    textLength: text.length,
+    source: source.source ?? null,
+    app: source.app ?? null,
+    windowTitle: source.windowTitle ?? null,
+    url: source.url ?? null,
+    confidence: source.confidence ?? null,
+    durationMs: round(performance.now() - source.started, 1),
+    collectedAt: new Date().toISOString(),
+    error: source.error ?? null,
+    ocr: source.ocr ?? null,
+  };
+}
+
+function applyOcrSourceCompatibility(screen, source, options) {
+  const text = normalizeTextContextText(source.text ?? "");
+  screen.ocrText = text;
+  screen.ocrTextLength = text.length;
+  screen.ocr = {
+    status: source.status,
+    key: source.ocr?.key ?? options.key,
+    level: source.ocr?.level ?? options.level,
+    languages: source.ocr?.languages ?? options.languages,
+    usesLanguageCorrection: source.ocr?.usesLanguageCorrection ?? options.usesLanguageCorrection,
+    extractedAt: source.collectedAt,
+    durationMs: source.durationMs,
+    error: source.error ?? null,
+  };
+}
+
+async function extractTextFromImage(store, path, options) {
+  if (process.platform !== "darwin") {
+    return { status: "unavailable", text: "", error: "Apple Vision OCR requires macOS" };
+  }
+
+  const binary = await appleVisionOcrBinary(store);
+  if (!binary) {
+    return { status: "unavailable", text: "", error: "Apple Vision OCR helper is unavailable" };
+  }
+
+  const result = await runAsync(binary, [
+    path,
+    "--level", options.level,
+    "--languages", options.languages.join(","),
+    ...(options.usesLanguageCorrection ? [] : ["--no-language-correction"]),
+  ], { timeoutMs: 30_000 });
+  if (result.status !== 0) {
+    return {
+      status: "failed",
+      text: "",
+      error: (result.stderr || result.stdout || `OCR helper exited with ${result.status}`).trim(),
+    };
+  }
+
+  const text = normalizeOcrText(result.stdout);
+  return {
+    status: text ? "ready" : "empty",
+    text,
+  };
+}
+
+function normalizeOcrText(text) {
+  return normalizeTextContextText(text);
+}
+
+function normalizeTextContextText(text) {
+  return String(text ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+}
+
+function limitTextContext(text, maxChars = DEFAULT_TEXT_SNIPPET_MAX_CHARS) {
+  const normalized = normalizeTextContextText(text);
+  if (normalized.length <= maxChars) return normalized;
+  return normalized.slice(0, maxChars).trimEnd();
+}
+
+function formatScreenTextSnippet(screen, args = {}) {
+  const text = normalizeTextContextText(screen.textContext?.text ?? screen.ocrText ?? "");
+  if (!text) return "";
+  const maxChars = parsePositiveInteger(args["text-max-chars"] ?? args.textMaxChars ?? DEFAULT_TEXT_SNIPPET_MAX_CHARS, DEFAULT_TEXT_SNIPPET_MAX_CHARS);
+  return truncateText(text, maxChars);
+}
+
+function formatClipboardText(screen, args = {}) {
+  const snippet = formatScreenTextSnippet(screen, args);
+  if (!snippet) return "";
+  const context = screen.textContext;
+  const heading = context?.source || context?.windowTitle
+    ? [
+      `Screen text from ${context.source ?? context.provider}`,
+      context.windowTitle ? `Title: ${context.windowTitle}` : undefined,
+      context.url ? `URL: ${context.url}` : undefined,
+    ].filter(Boolean).join("\n")
+    : "Screen text";
+  return `${heading}\n\n${snippet}`;
+}
+
+function truncateText(text, maxChars) {
+  if (text.length <= maxChars) return text;
+  const truncated = text.slice(0, Math.max(0, maxChars - 20)).trimEnd();
+  return `${truncated}\n[truncated]`;
+}
+
+async function nativeOptimizerBinary(store) {
+  return swiftHelperBinary(store, {
+    cache: nativeOptimizerBinaries,
+    sourcePath: NATIVE_OPTIMIZER_SOURCE,
+    outputName: "native-image-optimizer",
+  });
 }
 
 async function menuBarControllerBinary(store) {
-  const cacheKey = store.dataDir;
-  if (menuBarControllerBinaries.has(cacheKey)) return menuBarControllerBinaries.get(cacheKey) ?? undefined;
+  return swiftHelperBinary(store, {
+    cache: menuBarControllerBinaries,
+    sourcePath: MENU_BAR_CONTROLLER_SOURCE,
+    outputName: "menu-bar-controller",
+  });
+}
 
-  if (!commandExists("xcrun") || !(await existingFile(MENU_BAR_CONTROLLER_SOURCE))) {
-    menuBarControllerBinaries.set(cacheKey, null);
-    return undefined;
-  }
+async function appleVisionOcrBinary(store) {
+  return swiftHelperBinary(store, {
+    cache: appleVisionOcrBinaries,
+    sourcePath: APPLE_VISION_OCR_SOURCE,
+    outputName: "apple-vision-ocr",
+  });
+}
 
+async function screenTargetSnapshotBinary(store) {
+  return swiftHelperBinary(store, {
+    cache: screenTargetSnapshotBinaries,
+    sourcePath: SCREEN_TARGET_SNAPSHOT_SOURCE,
+    outputName: "screen-target-snapshot",
+  });
+}
+
+async function macosAccessibilityTextBinary(store) {
+  return swiftHelperBinary(store, {
+    cache: macosAccessibilityTextBinaries,
+    sourcePath: MACOS_ACCESSIBILITY_TEXT_SOURCE,
+    outputName: "macos-accessibility-text",
+  });
+}
+
+async function swiftHelperBinary(store, { cache, sourcePath, outputName }) {
+  if (!(await existingFile(sourcePath))) return undefined;
+  const fingerprint = createHash("sha256")
+    .update(await readFile(sourcePath))
+    .update(`\0${process.arch}\0${process.platform}\0${VERSION}`)
+    .digest("hex");
+  const cacheKey = `${store.dataDir}:${outputName}:${fingerprint}`;
+  if (cache.has(cacheKey)) return await cache.get(cacheKey) ?? undefined;
+
+  const helperPromise = buildSwiftHelperBinary(store, { sourcePath, outputName, fingerprint });
+  cache.set(cacheKey, helperPromise);
+  const outputPath = await helperPromise;
+  cache.set(cacheKey, outputPath ?? null);
+  return outputPath ?? undefined;
+}
+
+async function buildSwiftHelperBinary(store, { sourcePath, outputName, fingerprint }) {
   const helperDir = join(store.dataDir, "helpers");
-  const outputPath = join(helperDir, "menu-bar-controller");
+  const outputPath = join(helperDir, outputName);
+  const fingerprintPath = `${outputPath}.sha256`;
   const moduleCachePath = join(helperDir, "swift-module-cache");
   await mkdir(moduleCachePath, { recursive: true });
 
-  if (await needsRefresh(outputPath, MENU_BAR_CONTROLLER_SOURCE)) {
+  const isCurrent = async () => (
+    await existingFile(outputPath)
+    && (await readFile(fingerprintPath, "utf8").catch(() => "")).trim() === fingerprint
+  );
+  if (await isCurrent()) return outputPath;
+  if (!commandExists("xcrun")) return undefined;
+
+  return withDirectoryLock(join(helperDir, `.${outputName}.build.lock`), async () => {
+    if (await isCurrent()) return outputPath;
+    const temporaryPath = `${outputPath}.tmp-${process.pid}-${Date.now().toString(36)}`;
     const result = run("xcrun", [
       "swiftc",
       "-module-cache-path", moduleCachePath,
-      MENU_BAR_CONTROLLER_SOURCE,
-      "-o", outputPath,
+      sourcePath,
+      "-o", temporaryPath,
     ], {
       env: { CLANG_MODULE_CACHE_PATH: moduleCachePath },
       timeoutMs: 60_000,
     });
     if (result.status !== 0) {
-      menuBarControllerBinaries.set(cacheKey, null);
+      await rm(temporaryPath, { force: true });
       return undefined;
     }
-  }
-
-  menuBarControllerBinaries.set(cacheKey, outputPath);
-  return outputPath;
+    await rename(temporaryPath, outputPath);
+    await writeFile(fingerprintPath, `${fingerprint}\n`, { mode: 0o600 });
+    return outputPath;
+  }, { timeoutMs: ARTIFACT_LOCK_TIMEOUT_MS });
 }
 
 async function startMenuBarController(store, handleCommand, args) {
@@ -1636,6 +2922,10 @@ async function startMenuBarController(store, handleCommand, args) {
       if (closed || !child.stdin.writable) return;
       child.stdin.write(`${JSON.stringify({ type: "state", ...state })}\n`);
     },
+    sendEvent(event) {
+      if (closed || !child.stdin.writable) return;
+      child.stdin.write(`${JSON.stringify(event)}\n`);
+    },
     stop() {
       if (closed) return;
       child.stdin.end();
@@ -1657,10 +2947,39 @@ async function prewarmOptimizer(options) {
   if (normalizeOptimizationOptions(options).optimizer === "sharp") await loadSharpModule();
 }
 
-async function needsRefresh(outputPath, sourcePath) {
-  const [outputStat, sourceStat] = await Promise.all([safeStat(outputPath), safeStat(sourcePath)]);
-  if (!sourceStat?.isFile()) return false;
-  return !outputStat?.isFile() || outputStat.mtimeMs < sourceStat.mtimeMs;
+async function prewarmWatchResources(store, watchState, args = {}) {
+  const started = performance.now();
+  const tasks = [() => prewarmOptimizer(watchState.options).then(() => true)];
+
+  if (watchState.screenTargetOptions?.enabled) {
+    tasks.push(() => prewarmScreenTargetSnapshot(store));
+  }
+
+  if (watchState.textOptions?.enabled) {
+    const providers = new Set(textProviderSequence(watchState.textOptions));
+    if (providers.has("accessibility")) tasks.push(() => prewarmAccessibilityText(store));
+    if (providers.has("ocr")) tasks.push(() => appleVisionOcrBinary(store).then(Boolean));
+  }
+
+  const results = await Promise.allSettled(tasks.map((task) => task()));
+  const ready = results.filter((result) => result.status === "fulfilled" && result.value).length;
+  if (shouldVerbose(args)) {
+    writeText(`[screenshotter] prewarm: ${ready}/${tasks.length} helpers ready in ${round(performance.now() - started, 1)}ms\n`);
+  }
+}
+
+async function prewarmScreenTargetSnapshot(store) {
+  const binary = await screenTargetSnapshotBinary(store);
+  if (!binary) return false;
+  run(binary, [], { timeoutMs: 5000 });
+  return true;
+}
+
+async function prewarmAccessibilityText(store) {
+  const binary = await macosAccessibilityTextBinary(store);
+  if (!binary) return false;
+  run(binary, ["--check"], { timeoutMs: 5000 });
+  return true;
 }
 
 function maxLongEdgeForPatchBudget(metadata, maxPatches) {
@@ -1957,16 +3276,15 @@ function macScreenshotDir() {
 async function waitForStableFile(filePath) {
   const deadline = Date.now() + FILE_STABLE_TIMEOUT_MS;
   let previousSize = -1;
-  let stableReads = 0;
 
   while (Date.now() < deadline) {
     const current = await safeStat(filePath);
     if (current?.isFile() && current.size > 0) {
+      const newestWriteMs = Math.max(current.mtimeMs, current.ctimeMs);
+      if (Date.now() - newestWriteMs >= FILE_STABLE_SETTLED_MS) return current;
       if (current.size === previousSize) {
-        stableReads += 1;
-        if (stableReads >= 2) return current;
+        return current;
       } else {
-        stableReads = 0;
         previousSize = current.size;
       }
     }
@@ -1977,51 +3295,220 @@ async function waitForStableFile(filePath) {
 }
 
 async function withStoreLock(store, fn) {
+  return withDirectoryLock(store.lockDir, fn, { timeoutMs: LOCK_TIMEOUT_MS });
+}
+
+async function withArtifactLock(store, key, fn) {
+  const lockName = createHash("sha256").update(key).digest("hex").slice(0, 32);
+  return withDirectoryLock(join(store.locksDir, `${lockName}.lock`), fn, {
+    timeoutMs: ARTIFACT_LOCK_TIMEOUT_MS,
+  });
+}
+
+async function withDirectoryLock(lockDir, fn, { timeoutMs, staleMs = LOCK_STALE_MS } = {}) {
   const started = Date.now();
+  const ownerPath = join(lockDir, "owner.json");
+  const owner = {
+    pid: process.pid,
+    token: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    createdAt: new Date().toISOString(),
+  };
+  await mkdir(dirname(lockDir), { recursive: true });
+
   while (true) {
+    let created = false;
     try {
-      await mkdir(store.lockDir);
+      await mkdir(lockDir);
+      created = true;
+      await writeFile(ownerPath, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
       break;
-    } catch {
-      const lockStat = await safeStat(store.lockDir);
-      if (lockStat && Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
-        await rm(store.lockDir, { recursive: true, force: true });
+    } catch (error) {
+      if (created) await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+      if (error?.code !== "EEXIST") throw error;
+      if (await staleDirectoryLock(lockDir, ownerPath, staleMs)) {
+        await rm(lockDir, { recursive: true, force: true });
         continue;
       }
-      if (Date.now() - started > LOCK_TIMEOUT_MS) throw new Error(`Timed out waiting for store lock: ${store.lockDir}`);
+      if (Date.now() - started > timeoutMs) throw new Error(`Timed out waiting for lock: ${lockDir}`);
       await delay(50);
     }
   }
 
+  const heartbeat = setInterval(() => {
+    const now = new Date();
+    utimes(lockDir, now, now).catch(() => undefined);
+  }, Math.min(LOCK_HEARTBEAT_MS, Math.max(250, Math.floor(staleMs / 3))));
+  heartbeat.unref?.();
+
   try {
     return await fn();
   } finally {
-    await rmdir(store.lockDir).catch(() => {});
+    clearInterval(heartbeat);
+    const currentOwner = await readLockOwner(ownerPath);
+    if (currentOwner?.token === owner.token) {
+      await rm(lockDir, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 }
 
-async function ensureStore(store) {
-  await mkdir(store.dataDir, { recursive: true });
-  await mkdir(store.originalsDir, { recursive: true });
-  await mkdir(store.optimizedDir, { recursive: true });
-  await mkdir(store.logsDir, { recursive: true });
+async function staleDirectoryLock(lockDir, ownerPath, staleMs) {
+  const lockStat = await safeStat(lockDir);
+  if (!lockStat || Date.now() - lockStat.mtimeMs <= staleMs) return false;
+  const owner = await readLockOwner(ownerPath);
+  return !owner?.pid || !processIsAlive(owner.pid);
+}
+
+async function readLockOwner(ownerPath) {
+  try {
+    return JSON.parse(await readFile(ownerPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+async function ensureStore(store, { maintain = true } = {}) {
+  await mkdir(store.dataDir, { recursive: true, mode: 0o700 });
+  await chmod(store.dataDir, 0o700).catch(() => undefined);
+  await mkdir(store.originalsDir, { recursive: true, mode: 0o700 });
+  await mkdir(store.optimizedDir, { recursive: true, mode: 0o700 });
+  await mkdir(store.textDir, { recursive: true, mode: 0o700 });
+  await mkdir(store.logsDir, { recursive: true, mode: 0o700 });
+  await mkdir(store.locksDir, { recursive: true, mode: 0o700 });
   await mkdir(dirname(store.dbPath), { recursive: true });
-  if (!(await existingFile(store.dbPath))) await writeDb(store, emptyDb());
+  await createStoreFile(store.dbPath, `${JSON.stringify(emptyDb(), null, 2)}\n`);
+  await createStoreFile(store.statsPath, `${JSON.stringify(emptyStats(), null, 2)}\n`);
+  await Promise.all([
+    chmod(store.dbPath, 0o600).catch(() => undefined),
+    chmod(store.statsPath, 0o600).catch(() => undefined),
+  ]);
+
+  if (maintain && !maintainedStores.has(store.dataDir)) {
+    maintainedStores.add(store.dataDir);
+    await compactStore(store);
+  }
+}
+
+async function createStoreFile(path, contents) {
+  try {
+    await writeFile(path, contents, { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+}
+
+async function compactStore(store, { removeOrphans = false } = {}) {
+  const retention = storeRetentionOptions();
+  const compacted = await withStoreLock(store, async () => {
+    const db = await readDb(store);
+    const result = compactScreenRecords(db, retention);
+    if (result.changed) await writeDb(store, db);
+    return {
+      ...result,
+      activePaths: [...new Set(db.screens
+        .filter((screen) => screenState(screen) !== "cleared")
+        .map((screen) => screen.optimizedPath)
+        .filter(Boolean))],
+    };
+  });
+
+  const cleanup = await cleanupRetiredArtifacts(store, compacted.retiredScreens, compacted.activePaths, { removeOrphans });
+  return {
+    expired: compacted.expired,
+    removedRecords: compacted.removedScreens.length,
+    removedFiles: cleanup.removedFiles,
+    retainedRecords: compacted.retained,
+  };
+}
+
+function storeRetentionOptions() {
+  return {
+    readyRetentionMs: parseNonNegativeInteger(process.env.SCREENSHOTTER_READY_RETENTION_MS, DEFAULT_READY_RETENTION_MS),
+    recordRetentionMs: parseNonNegativeInteger(process.env.SCREENSHOTTER_RECORD_RETENTION_MS, DEFAULT_RECORD_RETENTION_MS),
+    maxRecords: parsePositiveInteger(process.env.SCREENSHOTTER_MAX_SCREEN_RECORDS, DEFAULT_MAX_SCREEN_RECORDS),
+  };
+}
+
+function compactScreenRecords(db, options, nowMs = Date.now()) {
+  const now = new Date(nowMs).toISOString();
+  const retired = [];
+  let expired = 0;
+  for (const screen of db.screens) {
+    if (screenState(screen) !== "ready") continue;
+    if (nowMs - screenPreparedAtMs(screen) <= options.readyRetentionMs) continue;
+    screen.status = "cleared";
+    screen.clearedAt = now;
+    screen.clearReason = "retention-expired";
+    retired.push(screen);
+    expired += 1;
+  }
+
+  const newestFirst = [...db.screens].sort((a, b) => screenPreparedAtMs(b) - screenPreparedAtMs(a));
+  const retainedNewest = newestFirst
+    .filter((screen) => nowMs - screenPreparedAtMs(screen) <= options.recordRetentionMs)
+    .slice(0, options.maxRecords);
+  const retainedIds = new Set(retainedNewest.map((screen) => screen.id));
+  const removedScreens = db.screens.filter((screen) => !retainedIds.has(screen.id));
+  db.screens = retainedNewest.sort((a, b) => screenPreparedAtMs(a) - screenPreparedAtMs(b));
+
+  return {
+    changed: expired > 0 || removedScreens.length > 0,
+    expired,
+    retiredScreens: [...new Map([...retired, ...removedScreens].map((screen) => [screen.id, screen])).values()],
+    removedScreens,
+    retained: db.screens.length,
+  };
+}
+
+async function cleanupRetiredArtifacts(store, retiredScreens, activePaths, { removeOrphans }) {
+  const active = new Set(activePaths);
+  const candidates = new Set(retiredScreens.map((screen) => screen.optimizedPath).filter(Boolean));
+  if (removeOrphans) {
+    const entries = await readdir(store.optimizedDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isFile()) candidates.add(join(store.optimizedDir, entry.name));
+    }
+  }
+
+  let removedFiles = 0;
+  for (const path of candidates) {
+    if (active.has(path)) continue;
+    if (await existingFile(path)) removedFiles += 1;
+    await rm(path, { force: true });
+  }
+  for (const screen of retiredScreens) {
+    if (!screen.id) continue;
+    await rm(join(store.textDir, `${screen.id}.txt`), { force: true });
+    await rm(join(store.textDir, `${screen.id}-screen-context.md`), { force: true });
+  }
+  return { removedFiles };
 }
 
 async function readDb(store) {
   try {
     const parsed = JSON.parse(await readFile(store.dbPath, "utf8"));
-    if (parsed.schemaVersion !== SCHEMA_VERSION || !Array.isArray(parsed.screens)) return emptyDb();
+    if (parsed.schemaVersion !== SCHEMA_VERSION || !Array.isArray(parsed.screens)) {
+      throw new Error(`unsupported or invalid schema version ${parsed.schemaVersion ?? "unknown"}`);
+    }
     return parsed;
-  } catch {
-    return emptyDb();
+  } catch (error) {
+    if (error?.code === "ENOENT") return emptyDb();
+    throw new Error(`Could not read screenshot store ${store.dbPath}: ${formatError(error)}`);
   }
 }
 
 async function writeDb(store, db) {
   const tmpPath = `${store.dbPath}.tmp-${process.pid}`;
-  await writeFile(tmpPath, `${JSON.stringify(db, null, 2)}\n`);
+  await writeFile(tmpPath, `${JSON.stringify(db, null, 2)}\n`, { mode: 0o600 });
   await rename(tmpPath, store.dbPath);
 }
 
@@ -2029,16 +3516,115 @@ function emptyDb() {
   return { schemaVersion: SCHEMA_VERSION, screens: [] };
 }
 
+async function readStats(store) {
+  try {
+    const parsed = JSON.parse(await readFile(store.statsPath, "utf8"));
+    if (parsed.schemaVersion !== STATS_SCHEMA_VERSION) {
+      throw new Error(`unsupported stats schema version ${parsed.schemaVersion ?? "unknown"}`);
+    }
+    return normalizeStats(parsed);
+  } catch (error) {
+    if (error?.code === "ENOENT") return emptyStats();
+    throw new Error(`Could not read screenshot stats ${store.statsPath}: ${formatError(error)}`);
+  }
+}
+
+async function writeStats(store, stats) {
+  const tmpPath = `${store.statsPath}.tmp-${process.pid}`;
+  await writeFile(tmpPath, `${JSON.stringify(normalizeStats(stats), null, 2)}\n`, { mode: 0o600 });
+  await rename(tmpPath, store.statsPath);
+}
+
+async function recordPreparedScreenStats(store, screen) {
+  const stats = await readStats(store);
+  const originalBytes = Math.max(0, screen.originalBytes ?? 0);
+  const optimizedBytes = Math.max(0, screen.optimizedBytes ?? 0);
+  const savedBytes = Math.max(0, originalBytes - optimizedBytes);
+  const preparedAt = screenPreparedAt(screen) ?? new Date().toISOString();
+
+  stats.screensPrepared += 1;
+  stats.originalBytes += originalBytes;
+  stats.optimizedBytes += optimizedBytes;
+  stats.savedBytes += savedBytes;
+  stats.firstPreparedAt = stats.firstPreparedAt ?? preparedAt;
+  stats.lastPreparedAt = preparedAt;
+  incrementStatsBucket(stats.byProfile, screen.profile ?? DEFAULT_PROFILE, originalBytes, optimizedBytes, savedBytes);
+  incrementStatsBucket(stats.byOptimizer, screen.optimizer ?? "unknown", originalBytes, optimizedBytes, savedBytes);
+  await writeStats(store, stats);
+}
+
+function emptyStats() {
+  return {
+    schemaVersion: STATS_SCHEMA_VERSION,
+    screensPrepared: 0,
+    originalBytes: 0,
+    optimizedBytes: 0,
+    savedBytes: 0,
+    firstPreparedAt: null,
+    lastPreparedAt: null,
+    byProfile: {},
+    byOptimizer: {},
+  };
+}
+
+function normalizeStats(rawStats = {}) {
+  const stats = emptyStats();
+  stats.screensPrepared = nonNegativeNumber(rawStats.screensPrepared);
+  stats.originalBytes = nonNegativeNumber(rawStats.originalBytes);
+  stats.optimizedBytes = nonNegativeNumber(rawStats.optimizedBytes);
+  stats.savedBytes = nonNegativeNumber(rawStats.savedBytes);
+  stats.firstPreparedAt = rawStats.firstPreparedAt ?? null;
+  stats.lastPreparedAt = rawStats.lastPreparedAt ?? null;
+  stats.byProfile = normalizeStatsBuckets(rawStats.byProfile);
+  stats.byOptimizer = normalizeStatsBuckets(rawStats.byOptimizer);
+  return stats;
+}
+
+function normalizeStatsBuckets(rawBuckets = {}) {
+  const buckets = {};
+  if (!rawBuckets || typeof rawBuckets !== "object") return buckets;
+  for (const [key, value] of Object.entries(rawBuckets)) {
+    buckets[key] = {
+      screensPrepared: nonNegativeNumber(value?.screensPrepared),
+      originalBytes: nonNegativeNumber(value?.originalBytes),
+      optimizedBytes: nonNegativeNumber(value?.optimizedBytes),
+      savedBytes: nonNegativeNumber(value?.savedBytes),
+    };
+  }
+  return buckets;
+}
+
+function incrementStatsBucket(buckets, key, originalBytes, optimizedBytes, savedBytes) {
+  const bucket = buckets[key] ?? {
+    screensPrepared: 0,
+    originalBytes: 0,
+    optimizedBytes: 0,
+    savedBytes: 0,
+  };
+  bucket.screensPrepared += 1;
+  bucket.originalBytes += originalBytes;
+  bucket.optimizedBytes += optimizedBytes;
+  bucket.savedBytes += savedBytes;
+  buckets[key] = bucket;
+}
+
+function nonNegativeNumber(value) {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
 function storePaths(args) {
   const dataDir = resolve(expandHome(args["data-dir"] ?? process.env.SCREENSHOTTER_DATA_DIR ?? defaultDataDir()));
   return {
     dataDir,
     dbPath: join(dataDir, "screens.json"),
+    statsPath: join(dataDir, "stats.json"),
     logsDir: join(dataDir, "logs"),
     eventsLogPath: join(dataDir, "logs", "events.jsonl"),
     lockDir: join(dataDir, ".screens.lock"),
+    locksDir: join(dataDir, "locks"),
     originalsDir: join(dataDir, "originals"),
     optimizedDir: resolve(expandHome(args["optimized-dir"] ?? process.env.SCREENSHOTTER_OPTIMIZED_DIR ?? join(dataDir, "optimized"))),
+    textDir: join(dataDir, "text"),
   };
 }
 
@@ -2063,6 +3649,16 @@ function parseArgs(argv) {
     else if (token === "--log") args.log = true;
     else if (token === "--no-log") args["no-log"] = true;
     else if (token === "--no-clipboard") args["no-clipboard"] = true;
+    else if (token === "--ocr") args.ocr = true;
+    else if (token === "--text") args.text = true;
+    else if (token === "--with-text") args["with-text"] = true;
+    else if (token === "--no-text") args["no-text"] = true;
+    else if (token === "--with-target-context") args["with-target-context"] = true;
+    else if (token === "--target-context") args["target-context"] = true;
+    else if (token === "--no-ocr") args["no-ocr"] = true;
+    else if (token === "--require-ocr") args["require-ocr"] = true;
+    else if (token === "--no-language-correction") args["no-language-correction"] = true;
+    else if (token === "--prompt-permissions") args["prompt-permissions"] = true;
     else if (token === "--token-estimates") args["token-estimates"] = true;
     else if (token.startsWith("--")) {
       const [key, inlineValue] = token.slice(2).split("=", 2);
@@ -2119,7 +3715,7 @@ async function reportScreenEvent(args, store, type, screen, extra = {}) {
   if (!screen) return;
   const event = screenEvent(type, screen, extra);
   if (shouldLogEvents(args)) {
-    await appendFile(store.eventsLogPath, `${JSON.stringify(event)}\n`).catch((error) => {
+    await appendFile(store.eventsLogPath, `${JSON.stringify(event)}\n`, { mode: 0o600 }).catch((error) => {
       if (shouldVerbose(args)) process.stderr.write(`[screenshotter] failed to write log: ${formatError(error)}\n`);
     });
   }
@@ -2154,6 +3750,10 @@ function screenEvent(type, screen, extra = {}) {
     originalHeight: screen.originalHeight ?? null,
     width: screen.width ?? null,
     height: screen.height ?? null,
+    textProvider: screen.textContext?.provider ?? null,
+    textLength: screen.textContext?.text ? screen.textContext.text.length : 0,
+    ocrStatus: screen.ocr?.status ?? null,
+    ocrTextLength: screen.ocrTextLength ?? (screen.ocrText ? screen.ocrText.length : 0),
     ...extra,
   };
 }
@@ -2391,6 +3991,14 @@ function profileDisplayName(profile) {
 function formatWatchDelivery(args) {
   if (!args.clipboard) return "off";
   if (args["dry-run"]) return "dry-run";
+  const mode = clipboardDeliveryMode(args);
+  if (mode === "both") return "text + optimized image";
+  if (mode === "text") return "text";
+  if (mode === "files") return "optimized image + text file";
+  if (mode === "attachments") return "context file + optimized image";
+  if (mode === "remote-attachments") return `remote context + optimized image (${remoteAttachmentTarget(args)})`;
+  if (mode === "markdown") return "markdown context";
+  if (mode === "codex-inline") return "Codex app inline paste";
   return "optimized image";
 }
 
@@ -2411,7 +4019,7 @@ function shouldLogEvents(args) {
 }
 
 function writeResult(args, value) {
-  const result = publicResult(value);
+  const result = publicResult(value, projectionOptions(args));
   if (args.json) return writeText(`${JSON.stringify(result, null, 2)}\n`);
   if ("screens" in result) return writeText(formatScreens(result.screens));
   return writeText(`${JSON.stringify(result, null, 2)}\n`);
@@ -2422,16 +4030,28 @@ function formatScreens(screens) {
   return `${screens.map((screen) => `${screen.id} ${screen.status} ${screen.optimizedPath}`).join("\n")}\n`;
 }
 
-function publicResult(value) {
+function projectionOptions(args = {}) {
+  return {
+    includeText: shouldCollectTextContext(args),
+    includeTarget: screenTargetOptions(args).enabled,
+  };
+}
+
+function publicResult(value, options = {}) {
   if (!value || typeof value !== "object") return value;
   const result = { ...value };
-  if (result.screen) result.screen = publicScreen(result.screen);
-  if (Array.isArray(result.screens)) result.screens = result.screens.map(publicScreen);
+  if (result.screen) result.screen = publicScreen(result.screen, options);
+  if (Array.isArray(result.screens)) result.screens = result.screens.map((screen) => publicScreen(screen, options));
+  if (result.latest) result.latest = publicScreen(result.latest, options);
+  if (result.stats) result.stats = publicStats(result.stats);
+  if (result.historical) result.historical = publicStats(result.historical);
   return result;
 }
 
-function publicScreen(screen) {
+function publicScreen(screen, options = {}) {
   const status = screenState(screen);
+  const includeText = Boolean(options.includeText);
+  const includeTarget = Boolean(options.includeTarget);
   return {
     id: screen.id,
     hash: screen.hash,
@@ -2459,6 +4079,104 @@ function publicScreen(screen) {
     jpegQuality: screen.jpegQuality ?? null,
     maxOutputBytes: screen.maxOutputBytes ?? null,
     optimizer: screen.optimizer ?? null,
+    screenTarget: includeTarget ? publicScreenTarget(screen.screenTarget) : null,
+    textContext: includeText ? publicTextContext(screen.textContext) : null,
+    textSources: includeText ? publicTextSources(screen.textSources) : [],
+    ocrText: includeText ? screen.ocrText ?? null : null,
+    ocrTextLength: includeText ? screen.ocrTextLength ?? (screen.ocrText ? screen.ocrText.length : 0) : 0,
+    ocr: includeText ? publicOcr(screen.ocr) : null,
+  };
+}
+
+function publicScreenTarget(target) {
+  return target ? {
+    status: target.status ?? null,
+    collectedAt: target.collectedAt ?? null,
+    durationMs: target.durationMs ?? null,
+    frontmostApp: target.frontmostApp ?? null,
+    pointer: target.pointer ?? null,
+    pointerWindow: target.pointerWindow ?? null,
+    error: target.error ?? null,
+  } : null;
+}
+
+function publicTextContext(context) {
+  return context ? {
+    text: context.text ?? "",
+    provider: context.provider ?? null,
+    source: context.source ?? null,
+    app: context.app ?? null,
+    windowTitle: context.windowTitle ?? null,
+    url: context.url ?? null,
+    confidence: context.confidence ?? null,
+    durationMs: context.durationMs ?? null,
+    collectedAt: context.collectedAt ?? null,
+  } : null;
+}
+
+function publicTextSources(sources) {
+  return Array.isArray(sources) ? sources.map((source) => ({
+    provider: source.provider ?? null,
+    status: source.status ?? null,
+    textLength: source.textLength ?? (source.text ? source.text.length : 0),
+    source: source.source ?? null,
+    app: source.app ?? null,
+    windowTitle: source.windowTitle ?? null,
+    url: source.url ?? null,
+    confidence: source.confidence ?? null,
+    durationMs: source.durationMs ?? null,
+    collectedAt: source.collectedAt ?? null,
+    error: source.error ?? null,
+  })) : [];
+}
+
+function publicOcr(ocr) {
+  return ocr ? {
+    status: ocr.status ?? null,
+    level: ocr.level ?? null,
+    languages: ocr.languages ?? [],
+    usesLanguageCorrection: ocr.usesLanguageCorrection ?? null,
+    extractedAt: ocr.extractedAt ?? null,
+    durationMs: ocr.durationMs ?? null,
+    error: ocr.error ?? null,
+  } : null;
+}
+
+function publicStats(stats) {
+  const normalized = normalizeStats(stats);
+  return {
+    schemaVersion: normalized.schemaVersion,
+    screensPrepared: normalized.screensPrepared,
+    firstPreparedAt: normalized.firstPreparedAt,
+    lastPreparedAt: normalized.lastPreparedAt,
+    bytes: statsBytesSummary(normalized),
+    byProfile: publicStatsBuckets(normalized.byProfile),
+    byOptimizer: publicStatsBuckets(normalized.byOptimizer),
+  };
+}
+
+function publicStatsBuckets(buckets) {
+  return Object.fromEntries(Object.entries(buckets).map(([key, bucket]) => [
+    key,
+    {
+      screensPrepared: bucket.screensPrepared,
+      bytes: statsBytesSummary(bucket),
+    },
+  ]));
+}
+
+function statsBytesSummary(stats) {
+  const original = stats.originalBytes ?? 0;
+  const optimized = stats.optimizedBytes ?? 0;
+  const saved = stats.savedBytes ?? Math.max(0, original - optimized);
+  return {
+    original,
+    optimized,
+    saved,
+    originalFormatted: formatBytes(original),
+    optimizedFormatted: formatBytes(optimized),
+    savedFormatted: formatBytes(saved),
+    savedPercent: original > 0 ? round((saved / original) * 100, 1) : 0,
   };
 }
 
@@ -2472,20 +4190,22 @@ function usage() {
 Usage:
   screenshotter codex [wrapper options] -- [codex args...]
   screenshotter claude [wrapper options] -- [claude args...]
-  screenshotter clip [--target app] [--json]
-  screenshotter paste [--target app] [--json]
-  screenshotter codex-app [--verbose] [--json] [--reveal]
-  screenshotter claude-app [--json] [--reveal]
-  screenshotter watch [--toolbar] [--target auto|codex-app|codex|pi|claude-app|claude-code] [--no-clipboard] [--poll-ms 1500] [--verbose]
+  screenshotter clip [--target app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--clipboard-mode image|text|both|files|attachments|markdown|codex-inline] [--remote-target ssh-host] [--json]
+  screenshotter paste [--target app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--clipboard-mode image|text|both|files|attachments|markdown|codex-inline] [--remote-target ssh-host] [--json]
+  screenshotter codex-app [--with-text] [--with-target-context] [--verbose] [--json] [--reveal]
+  screenshotter claude-app [--with-text] [--with-target-context] [--json] [--reveal]
+  screenshotter watch [--toolbar] [--target auto|codex-app|codex|pi|claude-app|claude-code] [--with-text] [--with-target-context] [--no-clipboard] [--poll-ms 1500] [--verbose]
   screenshotter toolbar [watch options]
-  screenshotter prepare <image> [--target pi] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
-  screenshotter prepare-latest [--target codex-app] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
+  screenshotter prepare <image> [--target pi] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--ocr-level accurate|fast] [--ocr-languages en-US] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
+  screenshotter prepare-latest [--target codex-app] [--with-text] [--with-target-context] [--text-provider auto|browser-dom|accessibility|ocr|none] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--json]
   screenshotter list [--target pi] [--state ready] [--json]
   screenshotter claim [--target pi] [--max 4] [--json]
   screenshotter clear [--target pi] [--files] [--json]
+  screenshotter gc [--json]
   screenshotter status [--target pi] [--tokens] [--json]
-  screenshotter doctor [--json]
-  screenshotter copy [--format markdown|paths|json] [--clipboard]
+  screenshotter stats [--json]
+  screenshotter doctor [--prompt-permissions] [--json]
+  screenshotter copy [--format markdown|paths|json|text] [--clipboard]
   screenshotter reveal [--target codex-app]
   screenshotter bench [--latest 10] [--profile token|balanced|readability] [--optimizer sharp|native|sips] [--max-long-edge px] [--long-edge-percent pct] [--min-long-edge px] [--jpeg-quality 1-100] [--max-output-bytes n] [--max-patches n] [--tokens] [--json]
   screenshotter mcp-server
@@ -2495,14 +4215,31 @@ Usage:
 Environment:
   SCREENSHOTTER_DATA_DIR       Override the store directory.
   SCREENSHOTTER_OPTIMIZED_DIR  Override optimized image output directory.
-  SCREENSHOTTER_OPTIMIZER      Use sharp, native, or sips. Sharp/libvips is the default.
+  SCREENSHOTTER_OPTIMIZER      Use native, sharp, or sips. Native ImageIO is the default; sharp/libvips is opt-in.
   SCREENSHOTTER_VERBOSE=1      Print savings details to stderr and write event logs.
   SCREENSHOTTER_LOG=1          Write JSONL event logs.
+  SCREENSHOTTER_REMOTE_TARGET  Upload attachment bundles to this SSH host before clipboard handoff.
+  SCREENSHOTTER_READY_RETENTION_MS   Ready-screen retention (default: 24 hours).
+  SCREENSHOTTER_RECORD_RETENTION_MS  Cleared/claimed record retention (default: 30 days).
+  SCREENSHOTTER_MAX_SCREEN_RECORDS   Maximum retained screen records (default: 500).
 
 Profiles:
-  readability  Low/default: max long edge 4096 px, JPEG quality 90/88/85, 1 MB target.
+  readability  Low/default: max long edge 4096 px, JPEG quality 90. Sharp mode adds q90/q88/q85 with a 1 MB target.
   balanced     Mid: max long edge 3000 px, JPEG quality 85.
   token        High: max long edge 2200 px, JPEG quality 50, or 75 when not resized.
+
+Text:
+  --with-text collects direct visible text through macOS Accessibility.
+  --text-provider auto explicitly enables Accessibility with Apple Vision OCR fallback.
+  --ocr forces Apple Vision OCR as the text provider.
+  --no-ocr disables OCR fallback when using the auto provider.
+  --text-max-chars caps extracted text before it is stored or returned (default: 4000).
+  --clipboard-mode attachments copies a markdown context file and optimized image file for app/web paste.
+  --remote-target uploads attachment bundles to a private cache on an SSH host for remote terminal agents.
+  --clipboard-mode codex-inline pastes text inline, then the optimized image, into Codex as a fallback.
+
+Target context:
+  --with-target-context records frontmost app and the visible window under the pointer.
 `;
 }
 
@@ -2510,7 +4247,7 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     env: options.env ? { ...process.env, ...options.env } : undefined,
-    maxBuffer: 20 * 1024 * 1024,
+    maxBuffer: PROCESS_MAX_BUFFER_BYTES,
     timeout: options.timeoutMs,
   });
   return {
@@ -2518,6 +4255,105 @@ function run(command, args, options = {}) {
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? result.error?.message ?? "",
   };
+}
+
+async function measureAsync(operation) {
+  const started = performance.now();
+  const value = await operation();
+  return {
+    value,
+    durationMs: round(performance.now() - started, 1),
+  };
+}
+
+function estimateConcurrencyPerformance(durationMs, timings = {}) {
+  const prepare = timings.prepare ?? {};
+  const captureSavedMs = Math.max(0,
+    (timings.targetSnapshotMs ?? 0)
+    + (timings.fileStableMs ?? 0)
+    - (timings.captureInputsMs ?? 0));
+  const prepareSavedMs = Math.max(0,
+    (prepare.optimizeMs ?? 0)
+    + (prepare.targetMs ?? 0)
+    + (prepare.parallelTextMs ?? 0)
+    - (prepare.parallelStageMs ?? 0));
+  const savedMs = round(captureSavedMs + prepareSavedMs, 1);
+  const serialEstimateMs = round(durationMs + savedMs, 1);
+  return {
+    savedMs,
+    serialEstimateMs,
+    improvementPercent: serialEstimateMs > 0 ? round((savedMs / serialEstimateMs) * 100, 1) : 0,
+  };
+}
+
+function runAsync(command, args, options = {}) {
+  return new Promise((resolvePromise) => {
+    const maxBufferBytes = options.maxBufferBytes ?? PROCESS_MAX_BUFFER_BYTES;
+    let stdout = "";
+    let stderr = "";
+    let bufferedBytes = 0;
+    let settled = false;
+    let terminationError;
+    let timeout;
+    let forceKillTimeout;
+
+    const finish = (status, error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(forceKillTimeout);
+      const detail = error || terminationError;
+      resolvePromise({
+        status: detail ? 1 : (status ?? 1),
+        stdout,
+        stderr: [stderr, detail].filter(Boolean).join(stderr && detail ? "\n" : ""),
+      });
+    };
+
+    let child;
+    try {
+      child = spawn(command, args, {
+        cwd: options.cwd,
+        env: options.env ? { ...process.env, ...options.env } : undefined,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      finish(1, formatError(error));
+      return;
+    }
+
+    const terminate = (error) => {
+      if (terminationError) return;
+      terminationError = error;
+      child.kill("SIGTERM");
+      forceKillTimeout = setTimeout(() => child.kill("SIGKILL"), 250);
+      forceKillTimeout.unref?.();
+    };
+    const collect = (stream, append) => {
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk) => {
+        bufferedBytes += Buffer.byteLength(chunk);
+        if (bufferedBytes > maxBufferBytes) {
+          terminate(`Process output exceeded ${formatBytes(maxBufferBytes)}`);
+          return;
+        }
+        append(chunk);
+      });
+    };
+
+    collect(child.stdout, (chunk) => { stdout += chunk; });
+    collect(child.stderr, (chunk) => { stderr += chunk; });
+    child.once("error", (error) => finish(1, formatError(error)));
+    child.once("close", (code, signal) => {
+      const signalError = signal && !terminationError ? `${command} terminated by ${signal}` : undefined;
+      finish(code, signalError);
+    });
+
+    if (options.timeoutMs) {
+      timeout = setTimeout(() => terminate(`${command} timed out after ${options.timeoutMs}ms`), options.timeoutMs);
+      timeout.unref?.();
+    }
+  });
 }
 
 function parseJsonish(raw) {
@@ -2547,22 +4383,430 @@ async function pbcopy(text) {
   });
 }
 
-async function copyImageToClipboard(path) {
+async function copyScreenToClipboard(screen, args = {}) {
+  const mode = clipboardDeliveryMode(args);
+  const text = mode === "image" ? "" : formatClipboardText(screen, args);
+  const image = {
+    path: screen.optimizedPath,
+    pasteboardType: imagePasteboardType(screen),
+  };
+
+  if (mode === "remote-attachments") return copyScreenRemoteAttachmentsToClipboard(screen, args, text);
+  if (mode === "attachments") return copyScreenAttachmentsToClipboard(screen, args, text);
+  if (mode === "codex-inline") return pasteScreenInlineIntoCodexApp(text, image);
+
+  if (mode === "text") {
+    if (!text) throw new Error("No text context is available for the screenshot");
+    await pbcopy(text);
+    return { status: "text", label: "text snippet", textCopied: true };
+  }
+
+  if (mode === "markdown") {
+    await pbcopy(formatMarkdownClipboardText(screen, args, text));
+    return { status: "markdown", label: "markdown context", textCopied: Boolean(text) };
+  }
+
+  if (mode === "files") {
+    const paths = [screen.optimizedPath];
+    if (text) paths.push(await writeScreenTextFile(screen, args, text));
+    await copyFileUrlsToClipboard(paths);
+    return {
+      status: text ? "files" : "image-file",
+      label: text ? "optimized image and text file" : "optimized image file",
+      textCopied: Boolean(text),
+    };
+  }
+
+  if (mode === "both") {
+    if (text) {
+      await copyImageDataToClipboard(image, { text });
+      return { status: "both", label: "text snippet and optimized image", textCopied: true };
+    }
+
+    await copyImageDataToClipboard(image);
+    return { status: "image", label: "optimized image", textCopied: false };
+  }
+
+  await copyImageDataToClipboard(image);
+  return { status: "image", label: "optimized image", textCopied: false };
+}
+
+async function copyScreenAttachmentsToClipboard(screen, args, text) {
+  const paths = [];
+  const extractedText = formatScreenTextSnippet(screen, args);
+  if (extractedText || screen.screenTarget) {
+    paths.push(await writeScreenContextMarkdownFile(screen, args, extractedText));
+  }
+
+  paths.push(screen.optimizedPath);
+  await copyFileUrlsToClipboard(paths);
+
+  return {
+    status: "attachments",
+    label: extractedText || screen.screenTarget ? "context file and optimized image" : "optimized image",
+    textCopied: Boolean(extractedText || text),
+  };
+}
+
+async function copyScreenRemoteAttachmentsToClipboard(screen, args, text) {
+  const target = remoteAttachmentTarget(args);
+  if (!target) throw new Error("Remote attachment delivery requires --remote-target <ssh-host>");
+  if (!screen.optimizedPath) throw new Error("No optimized screenshot is available to upload");
+
+  const imageStat = await stat(screen.optimizedPath);
+  if (!imageStat.isFile() || imageStat.size === 0) throw new Error("Optimized screenshot is unavailable");
+  if (imageStat.size > REMOTE_ATTACHMENT_MAX_BYTES) {
+    throw new Error(`Optimized screenshot exceeds the ${formatBytes(REMOTE_ATTACHMENT_MAX_BYTES)} remote attachment limit`);
+  }
+
+  const remoteDir = remoteAttachmentDirs.get(target) ?? ensureRemoteAttachmentDir(target);
+  remoteAttachmentDirs.set(target, remoteDir);
+
+  const store = storePaths(args);
+  const id = screen.id || screen.hash?.slice(0, 12) || "screen";
+  const imageName = basename(screen.optimizedPath);
+  const contextName = `${id}-screen-context.md`;
+  const remoteImagePath = `${remoteDir}/${imageName}`;
+  const remoteContextPath = `${remoteDir}/${contextName}`;
+  const localContextPath = join(store.textDir, `${id}-remote-screen-context.md`);
+  const extractedText = formatScreenTextSnippet(screen, args);
+
+  await mkdir(store.textDir, { recursive: true });
+  await writeFile(localContextPath, formatScreenContextMarkdown(screen, extractedText, {
+    optimizedPath: remoteImagePath,
+    sourcePath: undefined,
+  }), { mode: 0o600 });
+
+  uploadRemoteAttachments(target, remoteDir, [localContextPath, screen.optimizedPath]);
+  secureRemoteAttachments(target, [remoteContextPath, remoteImagePath]);
+  await pbcopy(formatRemoteAttachmentClipboardText({
+    contextPath: remoteContextPath,
+    imagePath: remoteImagePath,
+    mimeType: screen.mimeType ?? mimeTypeForExtension(extname(screen.optimizedPath).toLowerCase()),
+  }));
+
+  return {
+    status: "remote-attachments",
+    label: "remote context and optimized image",
+    textCopied: Boolean(extractedText || text),
+  };
+}
+
+function ensureRemoteAttachmentDir(target) {
+  const result = run(remoteSshBinary(), remoteSshArgs(target, REMOTE_ATTACHMENT_DIR_COMMAND), { timeoutMs: 15_000 });
+  if (result.status !== 0) {
+    throw new Error(`Could not prepare remote attachment directory on ${target}: ${result.stderr || result.stdout || `ssh exited with ${result.status}`}`);
+  }
+
+  const remoteDir = result.stdout.trim().split(/\r?\n/).at(-1) ?? "";
+  if (!/^\/[A-Za-z0-9._@+/-]+$/.test(remoteDir)) {
+    throw new Error(`Remote attachment directory from ${target} was invalid`);
+  }
+  return remoteDir.replace(/\/+$/, "");
+}
+
+function uploadRemoteAttachments(target, remoteDir, localPaths) {
+  const destination = `${target}:${remoteDir}/`;
+  const result = run(remoteScpBinary(), [
+    "-q",
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=8",
+    ...localPaths,
+    destination,
+  ], { timeoutMs: 30_000 });
+  if (result.status !== 0) {
+    throw new Error(`Could not upload screenshot attachments to ${target}: ${result.stderr || result.stdout || `scp exited with ${result.status}`}`);
+  }
+}
+
+function secureRemoteAttachments(target, remotePaths) {
+  const command = `chmod 600 -- ${remotePaths.map(shellQuote).join(" ")}`;
+  const result = run(remoteSshBinary(), remoteSshArgs(target, command), { timeoutMs: 15_000 });
+  if (result.status !== 0) {
+    throw new Error(`Could not secure screenshot attachments on ${target}: ${result.stderr || result.stdout || `ssh exited with ${result.status}`}`);
+  }
+}
+
+function remoteSshArgs(target, command) {
+  return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "--", target, command];
+}
+
+function remoteSshBinary() {
+  return process.env.SCREENSHOTTER_SSH_BIN || "ssh";
+}
+
+function remoteScpBinary() {
+  return process.env.SCREENSHOTTER_SCP_BIN || "scp";
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`;
+}
+
+export function formatRemoteAttachmentClipboardText(bundle) {
+  return [
+    "Screenshotter remote attachment bundle. Read the context and image before responding.",
+    "[[screenshotter-remote-v1]]",
+    JSON.stringify({
+      contextPath: bundle.contextPath,
+      imagePath: bundle.imagePath,
+      mimeType: bundle.mimeType,
+    }),
+    "[[/screenshotter-remote-v1]]",
+  ].join("\n");
+}
+
+async function pasteScreenInlineIntoCodexApp(text, image) {
+  if (text) {
+    await pbcopy(text);
+    pasteClipboardIntoCodexApp();
+    await delay(CODEX_APP_PASTE_DELAY_MS);
+  }
+
+  await copyImageDataToClipboard(image);
+  pasteClipboardIntoCodexApp();
+
+  return {
+    status: "codex-inline",
+    label: text ? "text snippet and optimized image" : "optimized image",
+    textCopied: Boolean(text),
+    pasted: true,
+  };
+}
+
+function pasteClipboardIntoCodexApp() {
+  const script = `
+tell application "Codex" to activate
+delay 0.2
+tell application "System Events"
+  keystroke "v" using command down
+end tell
+`;
+  const result = run("osascript", ["-e", script], { timeoutMs: 5000 });
+  if (result.status !== 0) {
+    const details = result.stderr || result.stdout || `osascript exited with ${result.status}`;
+    throw new Error(`Could not paste into Codex app. Grant Accessibility/Automation permission and keep the Codex prompt focused. ${details}`);
+  }
+}
+
+function clipboardMode(args = {}) {
+  const configured = args["clipboard-mode"] ?? args.clipboardMode;
+  if (configured !== undefined) return normalizeClipboardMode(configured);
+  if (args.text || args["with-text"]) return "both";
+  return "image";
+}
+
+function clipboardDeliveryMode(args = {}) {
+  const mode = clipboardMode(args);
+  return mode === "attachments" && remoteAttachmentTarget(args) ? "remote-attachments" : mode;
+}
+
+function remoteAttachmentTarget(args = {}) {
+  const configured = args["remote-target"] ?? args.remoteTarget ?? process.env.SCREENSHOTTER_REMOTE_TARGET;
+  if (configured === undefined || configured === null || configured === "") return undefined;
+  const target = String(configured).trim();
+  if (!/^[A-Za-z0-9._@-]+$/.test(target) || target.startsWith("-")) {
+    throw new Error(`Invalid remote target: ${configured}`);
+  }
+  return target;
+}
+
+function normalizeClipboardMode(value) {
+  const mode = String(value ?? "image").toLowerCase();
+  if (mode === "image") return "image";
+  if (mode === "text") return "text";
+  if (mode === "both") return "both";
+  if (mode === "files" || mode === "file") return "files";
+  if (mode === "attachments" || mode === "attachment" || mode === "app-attachments" || mode === "context-files" || mode === "context-bundle" || mode === "bundle") return "attachments";
+  if (mode === "markdown" || mode === "md" || mode === "prompt") return "markdown";
+  if (mode === "codex-app" || mode === "codex" || mode === "codex-attachments" || mode === "codex-files" || mode === "claude" || mode === "claude-app" || mode === "claude-ai") return "attachments";
+  if (mode === "codex-inline" || mode === "codex-text") return "codex-inline";
+  throw new Error(`Unknown clipboard mode: ${value}. Use image, text, both, files, attachments, markdown, or codex-inline.`);
+}
+
+function formatMarkdownClipboardText(screen, args, text = formatClipboardText(screen, args)) {
+  return [
+    "Screenshot context",
+    "",
+    `Optimized image: ${screen.optimizedPath}`,
+    screen.sourcePath ? `Source image: ${screen.sourcePath}` : undefined,
+    "",
+    text ? text : "No screen text was extracted.",
+  ].filter((part) => part !== undefined).join("\n");
+}
+
+async function writeScreenTextFile(screen, args, text) {
+  const store = storePaths(args);
+  const id = screen.id || screen.hash?.slice(0, 12) || "screen";
+  const filePath = join(store.textDir, `${id}.txt`);
+  await mkdir(store.textDir, { recursive: true });
+  await writeFile(filePath, `${text.trimEnd()}\n`, { mode: 0o600 });
+  return filePath;
+}
+
+async function writeScreenContextMarkdownFile(screen, args, text) {
+  const store = storePaths(args);
+  const id = screen.id || screen.hash?.slice(0, 12) || "screen";
+  const filePath = join(store.textDir, `${id}-screen-context.md`);
+  await mkdir(store.textDir, { recursive: true });
+  await writeFile(filePath, formatScreenContextMarkdown(screen, text), { mode: 0o600 });
+  return filePath;
+}
+
+export function formatScreenContextMarkdown(screen, text, pathOverrides = {}) {
+  const frontmostApp = screen.screenTarget?.frontmostApp;
+  const pointerWindow = screen.screenTarget?.pointerWindow;
+  const pointerApp = pointerWindow?.app ?? pointerWindow;
+  const pointerAppName = pointerApp?.name;
+  const textContext = screen.textContext;
+  const shouldShowPointerApp = pointerWindow?.windowTitle && pointerAppName && pointerAppName !== frontmostApp?.name;
+  const extractedText = text ? text.trimEnd() : "No direct screen text was extracted.";
+  const codeFence = markdownCodeFence(extractedText);
+  const optimizedPath = pathOverrides.optimizedPath ?? screen.optimizedPath;
+  const sourcePath = Object.hasOwn(pathOverrides, "sourcePath") ? pathOverrides.sourcePath : screen.sourcePath;
+  return [
+    "# Screen Context",
+    "",
+    "## Image",
+    "",
+    `- Optimized image: ${optimizedPath}`,
+    sourcePath ? `- Source image: ${sourcePath}` : undefined,
+    frontmostApp?.name ? `- App: ${frontmostApp.name}` : undefined,
+    pointerWindow?.windowTitle ? `- Pointer window: ${pointerWindow.windowTitle}` : undefined,
+    shouldShowPointerApp ? `- Pointer window app: ${pointerAppName}` : undefined,
+    textContext?.windowTitle ? `- Text window: ${textContext.windowTitle}` : undefined,
+    textContext?.url ? `- URL: ${textContext.url}` : undefined,
+    textContext?.provider ? `- Text source: ${formatTextProviderLabel(textContext.provider)}` : undefined,
+    "",
+    "## Extracted Text",
+    "",
+    `${codeFence}text`,
+    extractedText,
+    codeFence,
+    "",
+    ...formatTextSourceDiagnostics(screen),
+  ].filter((part) => part !== undefined).join("\n");
+}
+
+function markdownCodeFence(text) {
+  const runs = String(text ?? "").match(/`+/g) ?? [];
+  const longestRun = runs.reduce((longest, run) => Math.max(longest, run.length), 0);
+  return "`".repeat(Math.max(3, longestRun + 1));
+}
+
+function formatTextProviderLabel(provider) {
+  switch (provider) {
+    case "browser-dom":
+      return "browser DOM";
+    case "macos-accessibility":
+      return "macOS Accessibility";
+    case "apple-vision-ocr":
+      return "Apple Vision OCR";
+    default:
+      return provider;
+  }
+}
+
+function formatTextSourceDiagnostics(screen) {
+  const sources = Array.isArray(screen.textSources) ? screen.textSources : [];
+  if (sources.length === 0) return [];
+  const rows = sources
+    .filter((source) => source.status !== "ready")
+    .map((source) => {
+      const parts = [
+        `- ${formatTextProviderLabel(source.provider)}: ${source.status ?? "unknown"}`,
+        source.app ? `app=${source.app}` : undefined,
+        source.error ? `error=${source.error}` : undefined,
+      ].filter(Boolean);
+      return parts.join(" | ");
+    });
+  if (rows.length === 0) return [];
+  return [
+    "## Text Source Diagnostics",
+    "",
+    ...rows,
+    "",
+  ];
+}
+
+async function copyFileUrlsToClipboard(paths) {
   const script = `
 ObjC.import("AppKit");
+ObjC.import("Foundation");
 
 function run(argv) {
-  const path = argv[0];
-  const image = $.NSImage.alloc.initWithContentsOfFile(path);
-  if (!image) throw new Error("Could not read image: " + path);
+  const filenames = $.NSMutableArray.arrayWithCapacity(argv.length);
+  const urls = $.NSMutableArray.arrayWithCapacity(argv.length);
+  for (let index = 0; index < argv.length; index += 1) {
+    const path = $.NSString.alloc.initWithUTF8String(argv[index]);
+    filenames.addObject(path);
+    urls.addObject($.NSURL.fileURLWithPath(path));
+  }
 
   const pasteboard = $.NSPasteboard.generalPasteboard;
   pasteboard.clearContents;
-  if (!pasteboard.writeObjects($.NSArray.arrayWithObject(image))) throw new Error("Could not write image to clipboard");
+  const wroteUrls = pasteboard.writeObjects(urls);
+  const wroteFilenames = pasteboard.setPropertyListForType(filenames, $.NSFilenamesPboardType);
+  if (!wroteUrls && !wroteFilenames) {
+    throw new Error("Could not write file paths to clipboard");
+  }
 }
 `;
-  const result = run("osascript", ["-l", "JavaScript", "-e", script, path], { timeoutMs: 5000 });
+  const result = await runAsync("osascript", ["-l", "JavaScript", "-e", script, ...paths], { timeoutMs: 5000 });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || `osascript exited with ${result.status}`);
+}
+
+async function copyImageDataToClipboard(image, { text = "" } = {}) {
+  const script = `
+ObjC.import("AppKit");
+ObjC.import("Foundation");
+
+function run(argv) {
+  const path = argv[0];
+  const pasteboardType = argv[1] || "public.png";
+  const text = argv[2] || "";
+  const data = $.NSData.dataWithContentsOfFile(path);
+  if (!data) throw new Error("Could not read image data: " + path);
+
+  const objects = $.NSMutableArray.arrayWithCapacity(text.length > 0 ? 2 : 1);
+  if (text.length > 0) {
+    objects.addObject(pasteboardTextItem(text));
+  }
+  objects.addObject(pasteboardDataItem(data, pasteboardType));
+
+  const pasteboard = $.NSPasteboard.generalPasteboard;
+  pasteboard.clearContents;
+  if (!pasteboard.writeObjects(objects)) throw new Error("Could not write clipboard items");
+}
+
+function pasteboardTextItem(text) {
+  const item = $.NSPasteboardItem.alloc.init;
+  if (!item.setStringForType(
+    $.NSString.alloc.initWithUTF8String(text),
+    $.NSString.alloc.initWithUTF8String("public.utf8-plain-text")
+  )) {
+    throw new Error("Could not create text pasteboard item");
+  }
+  return item;
+}
+
+function pasteboardDataItem(data, pasteboardType) {
+  const item = $.NSPasteboardItem.alloc.init;
+  if (!item.setDataForType(data, $.NSString.alloc.initWithUTF8String(pasteboardType))) {
+    throw new Error("Could not create image pasteboard item");
+  }
+  return item;
+}
+`;
+  const result = await runAsync("osascript", ["-l", "JavaScript", "-e", script, image.path, image.pasteboardType, text], { timeoutMs: 5000 });
+  if (result.status !== 0) throw new Error(result.stderr || result.stdout || `osascript exited with ${result.status}`);
+}
+
+function imagePasteboardType(screen = {}) {
+  const mimeType = String(screen.mimeType ?? "").toLowerCase();
+  if (IMAGE_PASTEBOARD_TYPES_BY_MIME.has(mimeType)) return IMAGE_PASTEBOARD_TYPES_BY_MIME.get(mimeType);
+  const ext = extname(screen.optimizedPath ?? screen.sourcePath ?? "").toLowerCase();
+  return IMAGE_PASTEBOARD_TYPES_BY_EXTENSION.get(ext) ?? "public.png";
 }
 
 function normalizeDirectExtension(ext) {

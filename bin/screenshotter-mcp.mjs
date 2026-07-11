@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +54,16 @@ const TOOLS = [
       freshMs: integerSchema("Only claim screenshots prepared within this many milliseconds.", DEFAULT_FRESH_MS),
       includeImageData: booleanSchema("Return claimed screenshots as MCP image content.", true),
       maxImageBytes: integerSchema("Maximum optimized bytes per screenshot to inline as MCP image content.", DEFAULT_MAX_IMAGE_BYTES),
+      withTargetContext: booleanSchema("Capture app and pointer-window metadata before collecting text.", false),
+      withText: booleanSchema("Collect text context before returning claimed screen JSON.", false),
+      noText: booleanSchema("Return image metadata without text context.", false),
+      noOcr: booleanSchema("Disable OCR fallback when using the auto provider.", false),
+      textProvider: enumSchema(["auto", "browser-dom", "accessibility", "ocr", "none"], "Text context provider.", "accessibility"),
+      ocr: booleanSchema("Force local Apple Vision OCR text before returning claimed screen JSON.", false),
+      requireOcr: booleanSchema("Fail the claim if explicitly requested OCR cannot run.", false),
+      ocrLevel: enumSchema(["accurate", "fast"], "Apple Vision OCR recognition level.", "accurate"),
+      ocrLanguages: stringSchema("Comma-separated Apple Vision OCR language identifiers.", "en-US"),
+      textMaxChars: integerSchema("Maximum extracted text characters returned per screenshot.", 4000),
       dataDir: stringSchema("Override SCREENSHOTTER_DATA_DIR for this call."),
     }),
   },
@@ -67,9 +78,12 @@ const TOOLS = [
   },
   {
     name: "screenshotter_clip_latest",
-    description: "Optimize the latest native macOS screenshot and copy the optimized image data to the macOS clipboard.",
+    description: "Optimize the latest native macOS screenshot and copy the optimized image data, or image plus text context, to the macOS clipboard.",
     inputSchema: prepareSchema({
       dir: stringSchema("Screenshot directory to scan. Defaults to the macOS screenshot folder."),
+      withText: booleanSchema("Collect text context and copy text plus image to the clipboard.", false),
+      clipboardMode: enumSchema(["image", "text", "both", "files", "attachments", "markdown", "codex-inline"], "Clipboard payload mode.", "image"),
+      textMaxChars: integerSchema("Maximum text context characters to include in clipboard text.", 4000),
     }),
   },
   {
@@ -179,7 +193,7 @@ async function statusTool(args) {
   pushTarget(cliArgs, args.target);
   pushDataDir(cliArgs, args.dataDir);
   if (args.tokens !== false) cliArgs.push("--tokens");
-  return jsonToolResult(runScreenshotter(cliArgs));
+  return jsonToolResult(await runScreenshotter(cliArgs));
 }
 
 async function prepareLatestTool(args) {
@@ -188,7 +202,7 @@ async function prepareLatestTool(args) {
   pushPrepareOptions(cliArgs, args);
   pushDataDir(cliArgs, args.dataDir);
 
-  const result = runScreenshotter(cliArgs);
+  const result = await runScreenshotter(cliArgs);
   return screenshotToolResult(result, imageOptions(args));
 }
 
@@ -200,7 +214,7 @@ async function prepareTool(args) {
   pushPrepareOptions(cliArgs, args);
   pushDataDir(cliArgs, args.dataDir);
 
-  const result = runScreenshotter(cliArgs);
+  const result = await runScreenshotter(cliArgs);
   return screenshotToolResult(result, imageOptions(args));
 }
 
@@ -209,9 +223,11 @@ async function claimTool(args) {
   pushTarget(cliArgs, args.target ?? DEFAULT_TARGET);
   pushArg(cliArgs, "--max", args.max ?? DEFAULT_MAX);
   pushArg(cliArgs, "--fresh-ms", args.freshMs ?? DEFAULT_FRESH_MS);
+  if (args.withTargetContext) cliArgs.push("--with-target-context");
+  pushTextOptions(cliArgs, args);
   pushDataDir(cliArgs, args.dataDir);
 
-  const result = runScreenshotter(cliArgs);
+  const result = await runScreenshotter(cliArgs);
   return screenshotToolResult(result, imageOptions(args));
 }
 
@@ -220,30 +236,32 @@ async function clearTool(args) {
   pushTarget(cliArgs, args.target ?? DEFAULT_TARGET);
   pushDataDir(cliArgs, args.dataDir);
   if (args.files) cliArgs.push("--files");
-  return jsonToolResult(runScreenshotter(cliArgs));
+  return jsonToolResult(await runScreenshotter(cliArgs));
 }
 
 async function clipLatestTool(args) {
   const cliArgs = ["clip", "--json"];
   pushTarget(cliArgs, args.target ?? "app");
   pushPrepareOptions(cliArgs, args);
+  pushArg(cliArgs, "--clipboard-mode", args.clipboardMode);
+  pushArg(cliArgs, "--text-max-chars", args.textMaxChars);
   pushDataDir(cliArgs, args.dataDir);
-  return jsonToolResult(runScreenshotter(cliArgs));
+  return jsonToolResult(await runScreenshotter(cliArgs));
 }
 
 async function screenshotDirTool() {
-  return jsonToolResult(runScreenshotter(["screenshot-dir", "--json"]));
+  return jsonToolResult(await runScreenshotter(["screenshot-dir", "--json"]));
 }
 
-function runScreenshotter(args) {
+async function runScreenshotter(args) {
   const command = screenshotterCommand();
-  const result = spawnSync(command.executable, [...command.args, ...args], {
-    encoding: "utf8",
+  const result = await runProcess(command.executable, [...command.args, ...args], {
+    timeoutMs: 60_000,
     maxBuffer: 50 * 1024 * 1024,
   });
 
-  if (result.status !== 0) {
-    throw new Error((result.stderr || result.stdout || `screenshotter exited with ${result.status}`).trim());
+  if (result.code !== 0) {
+    throw new Error((result.stderr || result.stdout || `screenshotter exited with ${result.code}`).trim());
   }
 
   try {
@@ -251,6 +269,47 @@ function runScreenshotter(args) {
   } catch (error) {
     throw new Error(`screenshotter returned invalid JSON: ${formatError(error)}`);
   }
+}
+
+function runProcess(executable, args, { timeoutMs, maxBuffer }) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = [];
+    const stderr = [];
+    let buffered = 0;
+    let settled = false;
+    let timeout;
+
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const collect = (chunks) => (chunk) => {
+      buffered += chunk.length;
+      if (buffered > maxBuffer) {
+        child.kill("SIGKILL");
+        finish(() => rejectPromise(new Error(`screenshotter output exceeded ${maxBuffer} bytes`)));
+        return;
+      }
+      chunks.push(chunk);
+    };
+
+    child.stdout.on("data", collect(stdout));
+    child.stderr.on("data", collect(stderr));
+    child.on("error", (error) => finish(() => rejectPromise(error)));
+    child.on("close", (code) => finish(() => resolvePromise({
+      code: code ?? 1,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8"),
+    })));
+    timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => rejectPromise(new Error(`screenshotter timed out after ${timeoutMs}ms`)));
+    }, timeoutMs);
+    timeout.unref?.();
+  });
 }
 
 function screenshotterCommand() {
@@ -261,7 +320,7 @@ function screenshotterCommand() {
   return { executable: configured, args: [] };
 }
 
-function screenshotToolResult(result, options) {
+async function screenshotToolResult(result, options) {
   const content = [
     {
       type: "text",
@@ -271,7 +330,7 @@ function screenshotToolResult(result, options) {
 
   if (options.includeImageData) {
     for (const screen of resultScreens(result)) {
-      const image = imageContent(screen, options.maxImageBytes);
+      const image = await imageContent(screen, options.maxImageBytes);
       if (image) content.push(image);
     }
   }
@@ -308,12 +367,11 @@ function resultScreens(result) {
   return [];
 }
 
-function imageContent(screen, maxImageBytes) {
+async function imageContent(screen, maxImageBytes) {
   if (!screen?.optimizedPath || !screen.mimeType) return undefined;
-  if (!existsSync(screen.optimizedPath)) return undefined;
-
-  const bytes = readFileSync(screen.optimizedPath);
-  if (bytes.byteLength > maxImageBytes) return undefined;
+  const file = await stat(screen.optimizedPath).catch(() => null);
+  if (!file?.isFile() || file.size > maxImageBytes) return undefined;
+  const bytes = await readFile(screen.optimizedPath);
 
   return {
     type: "image",
@@ -330,8 +388,22 @@ function pushPrepareOptions(cliArgs, args) {
   pushArg(cliArgs, "--min-long-edge", args.minLongEdge);
   pushArg(cliArgs, "--max-patches", args.maxPatches);
   pushArg(cliArgs, "--max-output-bytes", args.maxOutputBytes);
+  if (args.withTargetContext) cliArgs.push("--with-target-context");
+  pushTextOptions(cliArgs, args);
   pushArg(cliArgs, "--dir", args.dir);
   pushArg(cliArgs, "--optimized-dir", args.optimizedDir);
+}
+
+function pushTextOptions(cliArgs, args) {
+  if (args.withText) cliArgs.push("--with-text");
+  if (args.noText) cliArgs.push("--no-text");
+  if (args.noOcr) cliArgs.push("--no-ocr");
+  if (args.ocr) cliArgs.push("--ocr");
+  if (args.requireOcr) cliArgs.push("--require-ocr");
+  pushArg(cliArgs, "--text-provider", args.textProvider);
+  pushArg(cliArgs, "--text-max-chars", args.textMaxChars);
+  pushArg(cliArgs, "--ocr-level", args.ocrLevel);
+  pushArg(cliArgs, "--ocr-languages", args.ocrLanguages);
 }
 
 function pushTarget(cliArgs, target) {
@@ -383,12 +455,22 @@ function prepareSchema(extraProperties = {}, required = []) {
   return objectSchema({
     target: stringSchema("Target name to prepare screenshots for.", DEFAULT_TARGET),
     profile: enumSchema(["token", "balanced", "readability"], "Optimization profile.", DEFAULT_PROFILE),
-    optimizer: enumSchema(["sharp", "native", "sips"], "Image optimizer implementation. Sharp/libvips is the default."),
+    optimizer: enumSchema(["native", "sharp", "sips"], "Image optimizer implementation. Native ImageIO is the default; Sharp/libvips is opt-in when installed separately."),
     maxLongEdge: integerSchema("Override maximum long edge in pixels."),
     longEdgePercent: numberSchema("Resize to this percentage of the source long edge. Accepts 40 or 0.4 for 40%."),
     minLongEdge: integerSchema("Minimum long edge floor when using percentage-based resizing."),
     maxPatches: integerSchema("Override maximum 32px patch budget."),
     maxOutputBytes: integerSchema("Override maximum output bytes for byte-aware optimizers."),
+    withTargetContext: booleanSchema("Capture frontmost app and window-under-pointer metadata.", false),
+    withText: booleanSchema("Collect text context and include it in the returned screen JSON.", false),
+    noText: booleanSchema("Return image metadata without text context.", false),
+    noOcr: booleanSchema("Disable OCR fallback when using the auto provider.", false),
+    textProvider: enumSchema(["auto", "browser-dom", "accessibility", "ocr", "none"], "Text context provider.", "accessibility"),
+    ocr: booleanSchema("Force local Apple Vision OCR and include it in the returned screen JSON.", false),
+    requireOcr: booleanSchema("Fail if explicitly requested OCR cannot run.", false),
+    ocrLevel: enumSchema(["accurate", "fast"], "Apple Vision OCR recognition level.", "accurate"),
+    ocrLanguages: stringSchema("Comma-separated Apple Vision OCR language identifiers.", "en-US"),
+    textMaxChars: integerSchema("Maximum extracted text characters returned per screenshot.", 4000),
     dataDir: stringSchema("Override SCREENSHOTTER_DATA_DIR for this call."),
     optimizedDir: stringSchema("Override SCREENSHOTTER_OPTIMIZED_DIR for this call."),
     ...extraProperties,

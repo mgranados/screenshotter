@@ -19,6 +19,14 @@ This command:
 
 Then paste it in Claude with `Cmd+V`.
 
+To paste screen text plus the optimized screenshot into Claude Desktop or claude.ai:
+
+```sh
+screenshotter claude-app --with-text --with-target-context --clipboard-mode attachments
+```
+
+This copies direct Accessibility text in a markdown context file plus the optimized image file. Paste once with `Cmd+V` in the active Claude composer. Add `--text-provider auto` only when you explicitly want Apple Vision OCR fallback.
+
 `claude-app` is a named wrapper around the generic clipboard adapter:
 
 ```sh

@@ -11,11 +11,29 @@ const cli = join(root, "bin", "screenshotter.mjs");
 const workDir = mkdtempSync(join(tmpdir(), "screenshotter-mcp-smoke-"));
 const dataDir = join(workDir, "store");
 const imagePath = join(workDir, "input.png");
+const originalScreenTargetJson = process.env.SCREENSHOTTER_SCREEN_TARGET_JSON;
 
 let child;
 
 try {
   writeFileSync(imagePath, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lmV5xwAAAABJRU5ErkJggg==", "base64"));
+  process.env.SCREENSHOTTER_SCREEN_TARGET_JSON = JSON.stringify({
+    collectedAt: "2026-07-07T12:00:00.000Z",
+    frontmostApp: {
+      name: "MCP Mock App",
+      pid: 222,
+      bundleId: "com.example.McpMock",
+    },
+    pointer: {
+      x: 22,
+      y: 33,
+    },
+    pointerWindow: {
+      ownerName: "MCP Mock App",
+      windowTitle: "MCP Mock Window",
+      pid: 222,
+    },
+  });
 
   child = spawn(process.execPath, [cli, "mcp-server"], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -63,8 +81,12 @@ try {
     target: "mcp-smoke",
     dataDir,
     includeImageData: true,
+    ocr: true,
+    withTargetContext: true,
   });
   assert(prepared.content?.some((item) => item.type === "image" && item.mimeType === "image/png"), "prepare should return MCP image content");
+  assert(prepared.content?.[0]?.text?.includes("\"ocr\""), "prepare with ocr should return OCR metadata in JSON text");
+  assert(prepared.content?.[0]?.text?.includes("\"screenTarget\""), "prepare with target context should return screenTarget in JSON text");
 
   const claimed = await callTool(request, "screenshotter_claim", {
     target: "mcp-smoke",
@@ -84,6 +106,7 @@ try {
   console.log("mcp smoke test passed");
 } finally {
   if (child && !child.killed) child.kill();
+  restoreEnv("SCREENSHOTTER_SCREEN_TARGET_JSON", originalScreenTargetJson);
   rmSync(workDir, { recursive: true, force: true });
 }
 
@@ -116,4 +139,9 @@ async function waitForExit(process) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+function restoreEnv(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }

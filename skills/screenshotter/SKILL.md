@@ -16,10 +16,14 @@ The screenshotter package provides `/screenshotter` commands backed by the local
 - Native `Cmd+Shift+3` and `Cmd+Shift+4` screenshots are detected while pi is idle.
 - Detected screenshots are prepared and optimized locally by `screenshotter` using the high-fidelity `readability` profile by default.
 - Captured screenshots attach to the next interactive prompt the user submits.
+- `/screenshotter text` appends available direct-provider text without OCR.
+- `/screenshotter ocr` appends direct-provider text and explicitly enables local OCR fallback.
+- `/screenshotter image` returns to image-only attachments.
 - Screenshots captured while the agent is already running are ignored.
 - `/screenshotter token` switches to the aggressive readable 2200 px profile.
 - `/screenshotter balanced` switches to the mid 3000 px profile.
 - `/screenshotter off` disables watching and clears ready pi screenshots.
+- Remote pi sessions can consume `screenshotter-remote-v1` clipboard bundles uploaded by a local toolbar with `--remote-target`; this does not require the remote watcher to be enabled.
 
 ## Commands
 
@@ -28,6 +32,9 @@ The screenshotter package provides `/screenshotter` commands backed by the local
 /screenshotter token   use the aggressive readable 2200 px profile
 /screenshotter balanced use the mid 3000 px profile
 /screenshotter readability use the light default profile
+/screenshotter text    append available screen text to transformed prompts
+/screenshotter ocr     append screen text with local OCR fallback
+/screenshotter image   stop appending screen text
 /screenshotter off     disable capture and clear ready screenshots
 /screenshotter status  show watcher mode, ready count, byte savings, and estimated token savings
 /screenshotter clear   clear ready screenshots
@@ -36,5 +43,7 @@ The screenshotter package provides `/screenshotter` commands backed by the local
 ## Agent guidance
 
 - Do not ask the user to paste, copy, or drag/drop a screenshot when `/screenshotter on` is a better fit.
+- When the user wants exact exposed text in pi, suggest `/screenshotter text`. Use `/screenshotter ocr` only when pixel OCR is wanted; keep image-only mode as the default.
 - If the user asks why nothing attached, check whether `/screenshotter on` was enabled, whether pi was idle when the screenshot was taken, and whether `/screenshotter clear` or `/screenshotter off` was used.
+- If pi is running over SSH, do not recommend local `/Users/...` paths. Use the local toolbar's `--remote-target <ssh-host>` transport so the context and image exist on the same host as pi.
 - Treat attached screenshots as visual context for the user's prompt; do not mention implementation details unless relevant.

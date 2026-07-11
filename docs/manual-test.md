@@ -24,7 +24,7 @@ Expected:
 - Watch auto-detects `codex-app` when Codex app is running and uses default clipboard handoff.
 - Optimized image lands on the clipboard.
 - Source screenshot is untouched.
-- Default output is around 1 MB for full-desktop Retina screenshots, but varies with source content.
+- Default native output is usually around 1-2 MB for full-desktop Retina screenshots, but varies with source content. Use `--optimizer sharp` for the optional byte-target ladder when Sharp is installed separately.
 - Logs are written to `~/Library/Application Support/screenshotter/logs/events.jsonl` when `--verbose` is on.
 
 Fallback:

@@ -8,9 +8,11 @@ Local macOS screenshots for coding agents.
 
 Take a screenshot. `screenshotter` optimizes it locally and copies it to your clipboard.
 
-## Preview
+## Demo
 
-![screenshotter toolbar output](docs/assets/screenshotter-toolbar-terminal.png)
+![Screenshotter toolbar preparing a compressed screenshot and Accessibility Markdown for Codex and Claude](docs/assets/screenshotter-demo.gif)
+
+**The menu-bar icon animates while processing and confirms when both files are ready:** a compressed screenshot and a Markdown sidecar containing direct macOS Accessibility text, without OCR. The demo pastes the same bundle into Codex and Claude.
 
 ## Install
 
@@ -64,6 +66,8 @@ screenshotter toolbar
 
 This is the same watcher with a small menu-bar control. It needs Apple command line tools for the optional menu bar; without them, use `screenshotter watch`.
 
+Screenshot preparation is pipelined: app detection runs while the screenshot finishes writing, then image compression runs alongside direct text extraction. OCR starts only when direct text is unavailable. A repeatable performance test keeps this path at least 20% faster than running those steps one by one; the current local result is about 36% faster.
+
 For pi:
 
 ```sh
@@ -86,7 +90,7 @@ Average from 5 recent screenshots. Default preserves readability. Downscale defa
 
 Default mode helps with:
 
-- Upload bandwidth: often `2-5 MB -> <1 MB`.
+- Upload bandwidth: often `2-5 MB -> ~1-2 MB` with the native default; smaller targets are available with `--optimizer sharp` when Sharp is installed separately.
 - Paste/send latency: less image data for Codex or Claude to ingest.
 - Local storage: optimized copies are smaller.
 - Reliability: less likely to hit attachment limits.
@@ -100,20 +104,74 @@ screenshotter watch --profile balanced
 screenshotter watch --profile token
 ```
 
-The menu bar and pi use the same profiles. In pi: `/screenshotter readability`, `/screenshotter balanced`, or `/screenshotter token`.
+The menu bar and pi use the same profiles. In pi: `/screenshotter readability`, `/screenshotter balanced`, or `/screenshotter token`. Text is also opt-in: `/screenshotter text` enables direct providers only, while `/screenshotter ocr` explicitly adds OCR fallback.
+
+## Text extraction
+
+Text extraction is opt-in. `--with-text` reads visible text through macOS Accessibility and bundles it with the compressed screenshot.
+
+```sh
+screenshotter doctor --prompt-permissions
+screenshotter toolbar --with-text --with-target-context --clipboard-mode attachments
+```
+
+Grant Accessibility permission once to the terminal or app running `screenshotter`. OCR is not used by default. Enable it explicitly when needed:
+
+```sh
+screenshotter prepare-latest --ocr --json                 # OCR only
+screenshotter toolbar --with-text --text-provider auto    # Accessibility, then OCR fallback
+```
+
+## JavaScript API
+
+The package also exposes a small ESM API for tools that want the same prepared screen objects without shelling out:
+
+```js
+import { prepareLatestForClipboard, prepareImage } from "@marttinn/screenshotter";
+
+const prepared = await prepareImage("/path/to/screenshot.png", {
+  withText: true,
+  withTargetContext: true,
+});
+
+await prepareLatestForClipboard({
+  withText: true,
+  withTargetContext: true,
+  clipboardMode: "attachments",
+});
+```
 
 ## Commands
 
 ```sh
 screenshotter watch --verbose
+screenshotter watch --with-text --with-target-context --verbose
 screenshotter toolbar
-screenshotter clip --target codex-app
+screenshotter clip --with-text --target codex-app
 screenshotter claude-app --verbose
-screenshotter prepare-latest --target manual --json
+screenshotter prepare-latest --target manual --ocr --json
 screenshotter claim --target manual --json
+screenshotter gc --json
 screenshotter bench --latest 20 --tokens --json
 screenshotter doctor
 ```
+
+## Historical savings
+
+Each newly prepared screenshot updates a persistent aggregate at:
+
+```text
+~/Library/Application Support/screenshotter/stats.json
+```
+
+Check lifetime data saved with:
+
+```sh
+screenshotter stats --json
+screenshotter status --json
+```
+
+Screen records are bounded to 500 by default. Ready records expire after 24 hours and cleared or claimed records after 30 days. `screenshotter gc --json` runs retention immediately and removes orphan optimized files; `SCREENSHOTTER_READY_RETENTION_MS`, `SCREENSHOTTER_RECORD_RETENTION_MS`, and `SCREENSHOTTER_MAX_SCREEN_RECORDS` override those defaults.
 
 MCP, experimental:
 
@@ -129,6 +187,8 @@ Verbose runs write JSONL logs to:
 ```text
 ~/Library/Application Support/screenshotter/logs/events.jsonl
 ```
+
+Each event includes stage timings, so slow target detection, text extraction, compression, or clipboard delivery can be identified directly.
 
 ## License
 

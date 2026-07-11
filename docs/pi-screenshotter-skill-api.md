@@ -154,6 +154,8 @@ Status response:
 
 The pi skill should attach `optimizedPath` and use `mimeType` as the image MIME type.
 
+When pi itself runs on a remote SSH host, the macOS watcher cannot run inside that pi process. Run the local toolbar with `--clipboard-mode attachments --remote-target <ssh-host>` instead. Its versioned clipboard bundle points at files already uploaded to the remote private inbox. The extension consumes that bundle before the normal enabled-state check, appends the sidecar context, and supplies the image as base64 prompt content.
+
 ## Suggested pi Flow
 
 1. `/screenshotter on`

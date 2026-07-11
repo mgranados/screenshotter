@@ -65,6 +65,6 @@ Recommendation: keep `readability` as the default for product use when tiny UI t
 
 The three highest-value PoCs are now wired into the tool:
 
-- Sharp/libvips is the default optimizer for normal `prepare` and `prepare-latest`; native ImageIO remains available as `--optimizer native`.
-- `screenshotter bench` uses the selected optimizer and accepts `--optimizer native` or `--optimizer sips` for control runs.
+- Native ImageIO is the default optimizer for normal `prepare` and `prepare-latest`; Sharp/libvips remains available as `--optimizer sharp` when installed separately.
+- `screenshotter bench` uses the selected optimizer and accepts `--optimizer sharp`, `--optimizer native`, or `--optimizer sips` for control runs.
 - `npm run eval:text-scale -- --engine vision` uses the batch Apple Vision helper and reports fallback count in JSON/human output.

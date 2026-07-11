@@ -3,6 +3,11 @@
   "version": "0.0.1",
   "private": false,
   "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./cli": "./bin/screenshotter.mjs"
+  },
   "license": "MIT",
   "description": "Local-first macOS screenshot optimizer for AI coding agents.",
   "homepage": "https://github.com/mgranados/screenshotter#readme",
@@ -13,9 +18,6 @@
   "bugs": {
     "url": "https://github.com/mgranados/screenshotter/issues"
   },
-  "os": [
-    "darwin"
-  ],
   "bin": {
     "screenshotter": "bin/screenshotter.mjs",
     "screenshotter-mcp": "bin/screenshotter-mcp.mjs"
@@ -24,18 +26,24 @@
     "doctor": "node bin/screenshotter.mjs doctor",
     "bench": "node bin/screenshotter.mjs bench --latest 10 --json",
     "bench:poc": "node scripts/poc-benchmarks.mjs",
+    "bench:text-sources": "node scripts/text-source-benchmark.mjs",
     "eval:text-scale": "node scripts/text-scale-eval.mjs",
+    "eval:context-adversarial": "node scripts/context-adversarial-test.mjs",
+    "eval:accessibility-provider": "node scripts/accessibility-provider-eval.mjs",
+    "check:swift": "node scripts/swift-typecheck.mjs",
     "quality": "node scripts/quality-check.mjs",
     "quality:model": "node scripts/model-quality-check.mjs",
     "eval:rivals": "node scripts/rival-eval.mjs",
     "pack:dry-run": "npm_config_cache=${TMPDIR:-/tmp}/screenshotter-npm-cache npm pack --dry-run",
     "prepublishOnly": "npm run check && npm run pack:dry-run",
-    "check": "node --check bin/screenshotter.mjs && node --check bin/screenshotter-mcp.mjs && node --check extensions/screenshotter/index.js && node --check scripts/smoke-test.mjs && node --check scripts/pi-extension-smoke-test.mjs && node --check scripts/mcp-smoke-test.mjs && node --check scripts/quality-check.mjs && node --check scripts/model-quality-check.mjs && node --check scripts/text-scale-eval.mjs && node --check scripts/poc-benchmarks.mjs && node --check scripts/rival-eval.mjs && npm run test",
-    "test": "node scripts/smoke-test.mjs && node scripts/pi-extension-smoke-test.mjs && node scripts/mcp-smoke-test.mjs"
+    "check": "node --check index.mjs && node --check bin/screenshotter.mjs && node --check bin/screenshotter-mcp.mjs && node --check extensions/screenshotter/index.js && node --check scripts/smoke-test.mjs && node --check scripts/performance-smoke-test.mjs && node --check scripts/pi-extension-smoke-test.mjs && node --check scripts/remote-clipboard-smoke-test.mjs && node --check scripts/mcp-smoke-test.mjs && node --check scripts/context-adversarial-test.mjs && node --check scripts/accessibility-provider-eval.mjs && node --check scripts/swift-typecheck.mjs && node --check scripts/quality-check.mjs && node --check scripts/model-quality-check.mjs && node --check scripts/text-scale-eval.mjs && node --check scripts/text-source-benchmark.mjs && node --check scripts/poc-benchmarks.mjs && node --check scripts/rival-eval.mjs && npm run check:swift && npm run test",
+    "test": "node scripts/smoke-test.mjs && node scripts/performance-smoke-test.mjs && node scripts/pi-extension-smoke-test.mjs && node scripts/remote-clipboard-smoke-test.mjs && node scripts/mcp-smoke-test.mjs && node scripts/context-adversarial-test.mjs"
   },
   "files": [
+    "index.mjs",
     "bin",
     "docs",
+    "!docs/assets/screenshotter-demo.gif",
     "examples",
     "extensions",
     "scripts",
@@ -72,8 +80,5 @@
     "screenshot-compression",
     "image-optimization",
     "macos"
-  ],
-  "dependencies": {
-    "sharp": "^0.34.5"
-  }
+  ]
 }
